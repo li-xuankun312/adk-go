@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -200,6 +201,33 @@ type Context interface {
 	//     itself (e.g., invalid arguments, issue with the event system). The
 	//     request to ask the user has not been sent.
 	RequestConfirmation(hint string, payload any) error
+
+	// AuthResponse returns the end user's interactive (3-legged) OAuth consent
+	// response for the current tool call, or nil if none is present. A tool
+	// reads it to tell its first invocation (nil: raise consent with
+	// RequestCredential) from a resumed invocation after the user consented.
+	// It is the credential analog of ToolConfirmation.
+	//
+	// The value is whatever the client returned and is not evidence of anything
+	// on its own: nothing here validates it against the request ADK sent, which
+	// matches adk-python. Read it as "the client says the consent round-trip is
+	// over, ask your provider again", never as an authorization. For a managed
+	// flow such as GCP agent identity it carries no token at all.
+	AuthResponse() *authconsent.AuthConfig
+
+	// RequestCredential starts an interactive (3-legged) OAuth consent
+	// round-trip, asking the user to visit the consent URL in cfg before the
+	// tool proceeds. It is the credential analog of RequestConfirmation: ADK
+	// emits an adk_request_credential function call and resumes the original
+	// tool call once the client returns the consent response. Build cfg with
+	// [authconsent.OAuth2Consent].
+	//
+	// It returns an error if the request could not be enqueued: on a callback
+	// context, which has no function call id, and on a tool call that has
+	// already been resumed after consent, because a second round-trip on one
+	// call is not supported. A nil return says the request was recorded, not
+	// that the user approved anything.
+	RequestCredential(cfg authconsent.AuthConfig) error
 
 	// Workflow node section
 
