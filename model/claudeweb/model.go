@@ -20,16 +20,12 @@ type Model struct {
 	modelName string
 	effort    string // "high", "medium", "low"
 
-	// Conversation state: maps adk session context to remote conversation UUID.
-	// For simplicity, we use a single conversation per Model instance.
-	// For multi-session support, this should be keyed by session ID.
 	mu                sync.Mutex
-	convID            string // current conversation UUID
-	lastAssistantUUID string // parent_message_uuid for tool results
+	convID            string
+	lastAssistantUUID string
 }
 
 // NewModel creates a Model backed by the claude.ai web API.
-// effort can be "high", "medium", or "low". Empty defaults to "medium".
 func NewModel(client *Client, modelName string, effort string) *Model {
 	if effort == "" {
 		effort = "medium"
@@ -44,14 +40,11 @@ func NewModel(client *Client, modelName string, effort string) *Model {
 func (m *Model) Name() string { return m.modelName }
 
 // GenerateContent implements model.LLM.
-// It converts the adk-go request into a web API call, parses the SSE stream,
-// and yields LLMResponse events that the adk-go runner understands.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if req == nil {
 		return singleError(fmt.Errorf("claudeweb: nil request"))
 	}
 
-	// Determine what to send: new prompt or tool results
 	webReq, isToolResult, err := m.buildRequest(req)
 	if err != nil {
 		return singleError(fmt.Errorf("claudeweb: build request: %w", err))
@@ -60,7 +53,6 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	m.mu.Lock()
 	convID := m.convID
 	if convID == "" {
-		// First turn: create a new conversation
 		convID = generateUUID()
 		m.convID = convID
 		webReq.CreateConversationParams = &CreateConversationParams{
@@ -75,6 +67,9 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	}
 	m.mu.Unlock()
 
+	log.Printf("claudeweb: sending request convID=%s prompt=%q isToolResult=%v tools=%d",
+		convID, truncate(webReq.Prompt, 50), isToolResult, len(webReq.Tools))
+
 	return func(yield func(*model.LLMResponse, error) bool) {
 		body, err := m.client.Completion(convID, webReq)
 		if err != nil {
@@ -85,12 +80,10 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 
 		events := ParseSSEStream(body)
 
-		// Track content blocks being built
 		var blocks []contentBlockState
 		var stopReason string
 
 		for event := range events {
-			// Check context cancellation
 			select {
 			case <-ctx.Done():
 				yield(nil, ctx.Err())
@@ -99,10 +92,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			}
 
 			switch event.Event {
-			case "ping":
-				continue
-
-			case "conversation_ready":
+			case "ping", "conversation_ready":
 				continue
 
 			case "message_start":
@@ -121,7 +111,6 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 					log.Printf("claudeweb: parse content_block_start: %v", err)
 					continue
 				}
-				// Expand blocks slice if needed
 				for len(blocks) <= ev.Index {
 					blocks = append(blocks, contentBlockState{})
 				}
@@ -145,7 +134,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				switch ev.Delta.Type {
 				case "text_delta":
 					block.text.WriteString(ev.Delta.Text)
-					// Yield partial text for streaming
+					// Yield partial for streaming display
 					if stream {
 						resp := &model.LLMResponse{
 							Content: &genai.Content{
@@ -160,13 +149,12 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 							return
 						}
 					}
-
 				case "input_json_delta":
 					block.inputJSON.WriteString(ev.Delta.PartialJSON)
 				}
 
 			case "content_block_stop":
-				// Block is complete, nothing to do here yet
+				// done
 
 			case "message_delta":
 				var ev MessageDeltaEvent
@@ -179,16 +167,12 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				}
 
 			case "message_stop":
-				// Build the final response from all accumulated blocks
 				resp := buildFinalResponse(blocks, stopReason)
 				resp.TurnComplete = true
-				if !yield(resp, nil) {
-					return
-				}
+				yield(resp, nil)
 				return
 
 			case "message_limit":
-				// Rate limit info, log but don't error
 				log.Printf("claudeweb: message_limit event received")
 
 			case "error":
@@ -196,11 +180,10 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				return
 
 			default:
-				log.Printf("claudeweb: unknown event type: %s", event.Event)
+				log.Printf("claudeweb: unknown event: %s", event.Event)
 			}
 		}
 
-		// If we got here without message_stop, yield what we have
 		if len(blocks) > 0 {
 			resp := buildFinalResponse(blocks, stopReason)
 			resp.TurnComplete = true
@@ -210,7 +193,6 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 }
 
 // buildRequest converts an adk-go LLMRequest into a web API CompletionRequest.
-// Returns the request, whether it's a tool result turn, and any error.
 func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, bool, error) {
 	webReq := &CompletionRequest{
 		Model:         m.modelName,
@@ -222,14 +204,9 @@ func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, bool, e
 		Attachments:   []json.RawMessage{},
 		Files:         []json.RawMessage{},
 		SyncSources:   []json.RawMessage{},
+		Tools:         convertTools(req.Config),
 	}
 
-	// TODO: Convert tools from adk-go format to web API format.
-	// For now, send empty tools to get text completion working.
-	// Tool definitions will be added once the schema format is confirmed.
-	webReq.Tools = []WebTool{}
-
-	// Find the last user message to use as prompt, or tool results
 	if len(req.Contents) == 0 {
 		return nil, false, fmt.Errorf("no contents in request")
 	}
@@ -254,7 +231,7 @@ func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, bool, e
 		return webReq, true, nil
 	}
 
-	// Normal user message: extract text
+	// Normal user message: extract text from the last user content
 	var prompt strings.Builder
 	for _, part := range lastContent.Parts {
 		if part.Text != "" {
@@ -266,16 +243,16 @@ func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, bool, e
 	return webReq, false, nil
 }
 
-// convertTools converts genai tool config to web API tool format.
+// convertTools converts genai tool config to the web API tool format.
 func convertTools(config *genai.GenerateContentConfig) []WebTool {
 	if config == nil {
 		return []WebTool{}
 	}
 
 	var webTools []WebTool
-	for _, tool := range config.Tools {
-		for _, fd := range tool.FunctionDeclarations {
-			schema, _ := json.Marshal(fd.Parameters)
+	for _, t := range config.Tools {
+		for _, fd := range t.FunctionDeclarations {
+			schema := buildInputSchema(fd.Parameters)
 			webTools = append(webTools, WebTool{
 				Name:        fd.Name,
 				Description: fd.Description,
@@ -289,16 +266,52 @@ func convertTools(config *genai.GenerateContentConfig) []WebTool {
 	return webTools
 }
 
-// contentBlockState tracks the state of a content block being streamed.
+// buildInputSchema converts a genai.Schema to a JSON Schema object
+// that the web API accepts.
+func buildInputSchema(s *genai.Schema) json.RawMessage {
+	if s == nil {
+		return json.RawMessage(`{"type":"object","properties":{}}`)
+	}
+
+	schema := map[string]any{
+		"type": strings.ToLower(string(s.Type)),
+	}
+
+	if len(s.Properties) > 0 {
+		props := map[string]any{}
+		for name, prop := range s.Properties {
+			p := map[string]any{
+				"type": strings.ToLower(string(prop.Type)),
+			}
+			if prop.Description != "" {
+				p["description"] = prop.Description
+			}
+			if len(prop.Enum) > 0 {
+				p["enum"] = prop.Enum
+			}
+			props[name] = p
+		}
+		schema["properties"] = props
+	} else {
+		schema["properties"] = map[string]any{}
+	}
+
+	if len(s.Required) > 0 {
+		schema["required"] = s.Required
+	}
+
+	data, _ := json.Marshal(schema)
+	return data
+}
+
 type contentBlockState struct {
-	blockType string // "text" or "tool_use"
-	id        string // tool_use ID
-	name      string // tool name
+	blockType string
+	id        string
+	name      string
 	text      strings.Builder
 	inputJSON strings.Builder
 }
 
-// buildFinalResponse assembles the final LLMResponse from completed content blocks.
 func buildFinalResponse(blocks []contentBlockState, stopReason string) *model.LLMResponse {
 	content := &genai.Content{
 		Role: "model",
@@ -312,7 +325,6 @@ func buildFinalResponse(blocks []contentBlockState, stopReason string) *model.LL
 					Text: block.text.String(),
 				})
 			}
-
 		case "tool_use":
 			args := map[string]any{}
 			if block.inputJSON.Len() > 0 {
@@ -328,11 +340,8 @@ func buildFinalResponse(blocks []contentBlockState, stopReason string) *model.LL
 		}
 	}
 
-	resp := &model.LLMResponse{
-		Content: content,
-	}
+	resp := &model.LLMResponse{Content: content}
 
-	// Map stop reasons
 	switch stopReason {
 	case "end_turn":
 		resp.FinishReason = genai.FinishReasonStop
@@ -349,4 +358,11 @@ func singleError(err error) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		yield(nil, err)
 	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
