@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/genai"
 
@@ -17,81 +18,41 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+var pidCounter atomic.Int32
+
+type appConfig struct {
+	baseURL   string
+	orgID     string
+	cookie    string
+	modelName string
+	effort    string
+	workDir   string
+}
+
 func main() {
 	ctx := context.Background()
 
-	baseURL := os.Getenv("CLAUDE_WEB_BASE_URL")
-	if baseURL == "" {
-		baseURL = "https://c.aimonkey.plus"
-	}
-	orgID := os.Getenv("CLAUDE_WEB_ORG_ID")
-	if orgID == "" {
-		log.Fatal("set CLAUDE_WEB_ORG_ID")
-	}
-	cookie := os.Getenv("CLAUDE_WEB_COOKIE")
-	if cookie == "" {
-		log.Fatal("set CLAUDE_WEB_COOKIE")
-	}
-	modelName := os.Getenv("CLAUDE_WEB_MODEL")
-	if modelName == "" {
-		modelName = "claude-opus-4-6"
-	}
-	effort := os.Getenv("CLAUDE_WEB_EFFORT")
-	if effort == "" {
-		effort = "medium"
-	}
-	workDir := os.Getenv("CLAUDE_WEB_WORKDIR")
-	if workDir == "" {
-		workDir, _ = os.Getwd()
+	cfg := &appConfig{
+		baseURL:   envOr("CLAUDE_WEB_BASE_URL", "https://c.aimonkey.plus"),
+		orgID:     envRequired("CLAUDE_WEB_ORG_ID"),
+		cookie:    envRequired("CLAUDE_WEB_COOKIE"),
+		modelName: envOr("CLAUDE_WEB_MODEL", "claude-opus-4-6"),
+		effort:    envOr("CLAUDE_WEB_EFFORT", "medium"),
+		workDir:   envOr("CLAUDE_WEB_WORKDIR", mustGetwd()),
 	}
 
-	client := claudeweb.NewClient(claudeweb.ClientConfig{
-		BaseURL: baseURL,
-		OrgID:   orgID,
-		Cookie:  cookie,
-	})
-
-	llm := claudeweb.NewModel(client, modelName, effort)
-	llm.Shadow = &claudeweb.ShadowExecutor{
-		WorkDir: workDir,
-		Enabled: true,
-	}
-
-	a, err := llmagent.New(llmagent.Config{
-		Name:        "claude_shadow_agent",
-		Model:       llm,
-		Description: "Claude via web API with local shadow execution",
-		Instruction: "You are a helpful assistant.",
-	})
-	if err != nil {
-		log.Fatalf("Failed to create agent: %v", err)
-	}
-
-	sessionSvc := session.InMemoryService()
-	r, err := runner.New(runner.Config{
-		AppName:        "claudeweb",
-		Agent:          a,
-		SessionService: sessionSvc,
-	})
-	if err != nil {
-		log.Fatalf("Failed to create runner: %v", err)
-	}
-
-	// Create a session
-	sess, err := sessionSvc.Create(ctx, &session.CreateRequest{
-		AppName: "claudeweb",
-		UserID:  "user",
-	})
-	if err != nil {
-		log.Fatalf("Failed to create session: %v", err)
-	}
+	mainProc := newProcess(cfg, 0)
 
 	fmt.Println("═══════════════════════════════════════════════")
-	fmt.Println("  Claude Shadow Agent")
-	fmt.Printf("  Model: %s | Effort: %s\n", modelName, effort)
-	fmt.Printf("  Shadow workdir: %s\n", workDir)
-	fmt.Println("  Commands: /status  /new  /quit")
-	fmt.Println("  Empty Enter = ignored (no message sent)")
+	fmt.Println("  Claude Shadow Agent (Process Model)")
+	fmt.Printf("  Model: %s | Effort: %s\n", cfg.modelName, cfg.effort)
+	fmt.Printf("  Shadow workdir: %s\n", cfg.workDir)
+	fmt.Println("─────────────────────────────────────────────")
+	fmt.Println("  /spawn <prompt>  Start a child process")
+	fmt.Println("  /new             Reset main conversation")
+	fmt.Println("  /status          Show state")
+	fmt.Println("  /quit            Exit")
+	fmt.Println("  Empty Enter      Ignored")
 	fmt.Println("═══════════════════════════════════════════════")
 	fmt.Println()
 
@@ -105,55 +66,150 @@ func main() {
 		}
 		input := strings.TrimSpace(scanner.Text())
 
-		// Empty input: just re-prompt, don't send anything
 		if input == "" {
 			continue
 		}
 
-		// Commands
-		switch input {
-		case "/quit", "/exit", "/q":
+		switch {
+		case input == "/quit" || input == "/exit" || input == "/q":
 			fmt.Println("Bye!")
 			return
-		case "/status":
-			fmt.Printf("  Session: %s\n", sess.ID())
-			fmt.Printf("  Shadow: %s (%v)\n", workDir, llm.Shadow.Enabled)
+
+		case input == "/status":
+			fmt.Printf("  Main PID=0 convID=%s\n", mainProc.getConvID())
+			fmt.Printf("  Shadow workdir: %s\n", cfg.workDir)
+			fmt.Printf("  Total spawned: %d\n", pidCounter.Load())
 			fmt.Println()
-			continue
-		case "/new":
-			// Start fresh conversation
-			sess, err = sessionSvc.Create(ctx, &session.CreateRequest{
-				AppName: "claudeweb",
-				UserID:  "user",
-			})
-			if err != nil {
-				fmt.Printf("  Error creating session: %v\n", err)
+
+		case input == "/new":
+			mainProc = newProcess(cfg, 0)
+			fmt.Println("  ✓ Main conversation reset")
+			fmt.Println()
+
+		case strings.HasPrefix(input, "/spawn "):
+			prompt := strings.TrimPrefix(input, "/spawn ")
+			prompt = strings.TrimSpace(prompt)
+			if prompt == "" {
+				fmt.Println("  Usage: /spawn <prompt>")
 				continue
 			}
-			llm.ResetConversation()
-			fmt.Println("  ✓ New conversation started")
+			pid := int(pidCounter.Add(1))
+			fmt.Printf("\n┌─ [PID=%d] Spawning child process...\n", pid)
+			child := newProcess(cfg, pid)
+			child.run(ctx, prompt, "│  ")
+			fmt.Printf("└─ [PID=%d] Child process ended\n\n", pid)
+
+		default:
 			fmt.Println()
-			continue
+			mainProc.run(ctx, input, "")
+			fmt.Println()
 		}
+	}
+}
 
-		// Send to Claude
-		fmt.Println()
-		msg := genai.NewContentFromText(input, "user")
+// process represents an independent Claude conversation with shadow execution
+type process struct {
+	pid     int
+	llm     *claudeweb.Model
+	r       *runner.Runner
+	sessID  string
+	appName string
+}
 
-		for event, err := range r.Run(ctx, "user", sess.ID(), msg, agent.RunConfig{}) {
-			if err != nil {
-				fmt.Printf("\n[Error] %v\n", err)
-				break
-			}
-			if event.Content() != nil {
-				for _, part := range event.Content().Parts {
-					if part.Text != "" {
+func newProcess(cfg *appConfig, pid int) *process {
+	client := claudeweb.NewClient(claudeweb.ClientConfig{
+		BaseURL: cfg.baseURL,
+		OrgID:   cfg.orgID,
+		Cookie:  cfg.cookie,
+	})
+
+	llm := claudeweb.NewModel(client, cfg.modelName, cfg.effort)
+	llm.Shadow = &claudeweb.ShadowExecutor{
+		WorkDir: cfg.workDir,
+		Enabled: true,
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:        fmt.Sprintf("claude_pid_%d", pid),
+		Model:       llm,
+		Description: "Claude with shadow execution",
+		Instruction: "You are a helpful assistant.",
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	sessSvc := session.InMemoryService()
+	appName := fmt.Sprintf("proc_%d", pid)
+	r, err := runner.New(runner.Config{
+		AppName:        appName,
+		Agent:          a,
+		SessionService: sessSvc,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create runner: %v", err)
+	}
+
+	sess, err := sessSvc.Create(context.Background(), &session.CreateRequest{
+		AppName: appName,
+		UserID:  "user",
+	})
+	if err != nil {
+		log.Fatalf("Failed to create session: %v", err)
+	}
+
+	return &process{
+		pid:     pid,
+		llm:     llm,
+		r:       r,
+		sessID:  sess.ID(),
+		appName: appName,
+	}
+}
+
+func (p *process) getConvID() string {
+	return p.llm.ConvID()
+}
+
+func (p *process) run(ctx context.Context, prompt string, prefix string) {
+	msg := genai.NewContentFromText(prompt, "user")
+	for event, err := range p.r.Run(ctx, "user", p.sessID, msg, agent.RunConfig{}) {
+		if err != nil {
+			fmt.Printf("%s[Error] %v\n", prefix, err)
+			break
+		}
+		if event.Content() != nil {
+			for _, part := range event.Content().Parts {
+				if part.Text != "" {
+					if prefix != "" {
+						for _, line := range strings.Split(part.Text, "\n") {
+							fmt.Printf("%s%s\n", prefix, line)
+						}
+					} else {
 						fmt.Print(part.Text)
 					}
 				}
 			}
 		}
-		fmt.Println()
-		fmt.Println()
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envRequired(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("set %s", key)
+	}
+	return v
+}
+
+func mustGetwd() string {
+	d, _ := os.Getwd()
+	return d
 }
