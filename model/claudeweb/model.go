@@ -46,6 +46,16 @@ func (m *Model) ResetConversation() {
 	m.mu.Unlock()
 }
 
+// ConvID returns the current conversation UUID (for status display).
+func (m *Model) ConvID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.convID == "" {
+		return "(none)"
+	}
+	return m.convID[:8]
+}
+
 // toolBlock tracks a tool_use content block being streamed
 type toolBlock struct {
 	name      string
