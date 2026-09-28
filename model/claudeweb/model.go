@@ -18,20 +18,26 @@ import (
 type Model struct {
 	client    *Client
 	modelName string
+	effort    string // "high", "medium", "low"
 
 	// Conversation state: maps adk session context to remote conversation UUID.
 	// For simplicity, we use a single conversation per Model instance.
 	// For multi-session support, this should be keyed by session ID.
-	mu             sync.Mutex
-	convID         string // current conversation UUID
+	mu                sync.Mutex
+	convID            string // current conversation UUID
 	lastAssistantUUID string // parent_message_uuid for tool results
 }
 
 // NewModel creates a Model backed by the claude.ai web API.
-func NewModel(client *Client, modelName string) *Model {
+// effort can be "high", "medium", or "low". Empty defaults to "medium".
+func NewModel(client *Client, modelName string, effort string) *Model {
+	if effort == "" {
+		effort = "medium"
+	}
 	return &Model{
 		client:    client,
 		modelName: modelName,
+		effort:    effort,
 	}
 }
 
@@ -210,7 +216,7 @@ func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, bool, e
 		Model:         m.modelName,
 		Timezone:      "Asia/Shanghai",
 		Locale:        "en-US",
-		Effort:        "high",
+		Effort:        m.effort,
 		ThinkingMode:  "off",
 		RenderingMode: "messages",
 		Attachments:   []json.RawMessage{},
