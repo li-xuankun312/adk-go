@@ -1,4 +1,5 @@
 package fs
+import "time"
 func new_block(dev int) int {
 	sb := get_super(dev)
 	if sb == nil { return 0 }

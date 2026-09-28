@@ -6,7 +6,7 @@ import (
 func printk(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format, args...)
 }
-func panic(msg string) {
+func kpanic(msg string) {
 	printk("Kernel panic: %s\n", msg)
 	os.Exit(1)
 }

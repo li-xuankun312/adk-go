@@ -1,4 +1,5 @@
 package fs
+import "time"
 func sync_inodes() {
 	mu.Lock()
 	defer mu.Unlock()
