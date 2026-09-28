@@ -38,6 +38,14 @@ func NewModel(client *Client, modelName string, effort string) *Model {
 
 func (m *Model) Name() string { return m.modelName }
 
+// ResetConversation clears conversation state so next message starts fresh.
+func (m *Model) ResetConversation() {
+	m.mu.Lock()
+	m.convID = ""
+	m.lastSentPrompt = ""
+	m.mu.Unlock()
+}
+
 // toolBlock tracks a tool_use content block being streamed
 type toolBlock struct {
 	name      string
