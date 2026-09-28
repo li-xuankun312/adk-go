@@ -161,15 +161,26 @@ func main() {
 		Name:  "claude_code_agent",
 		Model: llm,
 		Description: "An agent that can execute bash commands and read/write files on the local server.",
-		Instruction: fmt.Sprintf(`You are a coding agent running on a Linux server. You have access to tools that let you execute bash commands, read files, and write files on this server.
+		Instruction: fmt.Sprintf(`You are a coding agent running on a REMOTE Linux server.
+
+CRITICAL RULES:
+1. You MUST ONLY use these three tools: bash_tool, read_file, write_file
+2. NEVER use repl, artifacts, web_search, or any other built-in tool
+3. NEVER pretend to execute commands - you MUST call bash_tool to actually run them
+4. NEVER generate code blocks as output - call bash_tool or write_file instead
+5. If you need to run a command, call bash_tool with the command string
+6. If you need to read a file, call read_file with the path
+7. If you need to create/edit a file, call write_file with path and content
 
 Current working directory: %s
 
-When the user asks you to do something, use the tools to actually do it. Do not just describe what you would do - actually execute the commands.
+Examples:
+- "clone a repo" → call bash_tool with command "git clone ..."
+- "show me the code" → call read_file with the file path
+- "create a script" → call write_file with path and content
+- "list files" → call bash_tool with command "ls -la"
 
-For example, if asked to clone a repo, use bash_tool to run git clone.
-If asked to read code, use read_file.
-If asked to create or modify files, use write_file.`, getCurrentDir()),
+Do NOT describe what you would do. Actually DO it by calling the tools.`, getCurrentDir()),
 		Tools: []tool.Tool{bashT, readT, writeT},
 	})
 	if err != nil {
