@@ -56,7 +56,12 @@ func main() {
 		Cookie:  cookie,
 	})
 
-	llm := claudeweb.NewModel(client, modelName)
+	effort := os.Getenv("CLAUDE_WEB_EFFORT")
+	if effort == "" {
+		effort = "medium"
+	}
+
+	llm := claudeweb.NewModel(client, modelName, effort)
 
 	weatherTool, err := functiontool.New(functiontool.Config{
 		Name:        "get_weather",
