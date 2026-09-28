@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -78,7 +79,22 @@ func (s *ShadowExecutor) Execute(toolName string, inputJSON string) string {
 	}
 }
 
+// ensurePaths scans command for common remote paths and creates them locally.
+func (s *ShadowExecutor) ensurePaths(command string) {
+	paths := []string{
+		"/mnt/user-data/outputs",
+		"/mnt/user-data/uploads",
+		"/home/claude",
+	}
+	for _, p := range paths {
+		if strings.Contains(command, p) {
+			os.MkdirAll(p, 0755)
+		}
+	}
+}
+
 func (s *ShadowExecutor) execBash(command string) string {
+	s.ensurePaths(command)
 	log.Printf("[shadow] ▶ executing: %s", truncateCmd(command, 120))
 
 	cmd := exec.Command("bash", "-c", command)
