@@ -171,8 +171,8 @@ func runChildProcess(pid int64, prompt string) {
 			result.WriteString(fmt.Sprintf("[Error] %v", err))
 			break
 		}
-		if event.Content() != nil {
-			for _, part := range event.Content().Parts {
+		if event.Content != nil {
+			for _, part := range event.Content.Parts {
 				if part.Text != "" {
 					result.WriteString(part.Text)
 				}
@@ -192,8 +192,8 @@ func runPrompt(ctx context.Context, llm *claudeweb.Model, r *runner.Runner, sess
 			fmt.Printf("%s[Error] %v\n", prefix, err)
 			break
 		}
-		if event.Content() != nil {
-			for _, part := range event.Content().Parts {
+		if event.Content != nil {
+			for _, part := range event.Content.Parts {
 				if part.Text != "" {
 					if prefix != "" {
 						for _, line := range strings.Split(part.Text, "\n") {
@@ -244,7 +244,7 @@ func newConversation(name string) (*claudeweb.Model, *runner.Runner, string) {
 	if err != nil {
 		log.Fatalf("session create failed: %v", err)
 	}
-	return llm, r, sess.ID()
+	return llm, r, sess.Session.ID()
 }
 
 func envOr(key, fallback string) string {
