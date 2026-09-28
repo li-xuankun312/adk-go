@@ -18,11 +18,11 @@ type Model struct {
 	client    *Client
 	modelName string
 	effort    string
+	Shadow    *ShadowExecutor // if set, mirrors remote tool calls locally
 
-	mu                sync.Mutex
-	convID            string
-	lastAssistantUUID string
-	lastSentPrompt    string // prevent re-sending the same prompt
+	mu             sync.Mutex
+	convID         string
+	lastSentPrompt string
 }
 
 func NewModel(client *Client, modelName string, effort string) *Model {
@@ -38,23 +38,26 @@ func NewModel(client *Client, modelName string, effort string) *Model {
 
 func (m *Model) Name() string { return m.modelName }
 
+// toolBlock tracks a tool_use content block being streamed
+type toolBlock struct {
+	name      string
+	inputJSON strings.Builder
+}
+
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if req == nil {
 		return emptyResponse()
 	}
 
 	prompt := m.extractPrompt(req)
-
-	// Nothing to send: empty input, synthetic runner message, or duplicate
 	if prompt == "" {
-		log.Printf("claudeweb: skip (empty/synthetic prompt)")
 		return emptyResponse()
 	}
 
 	m.mu.Lock()
 	if prompt == m.lastSentPrompt {
 		m.mu.Unlock()
-		log.Printf("claudeweb: skip (duplicate prompt)")
+		log.Printf("claudeweb: skip (duplicate)")
 		return emptyResponse()
 	}
 	m.lastSentPrompt = prompt
@@ -89,19 +92,15 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 		}
 	}
 
-	log.Printf("claudeweb: → convID=%s prompt=%q", convID[:8], truncate(prompt, 60))
+	log.Printf("claudeweb: → %s prompt=%q", convID[:8], truncate(prompt, 60))
 
 	return func(yield func(*model.LLMResponse, error) bool) {
 		body, err := m.client.Completion(convID, webReq)
 		if err != nil {
-			// On error, reset state so next real input creates a fresh conversation
 			m.mu.Lock()
 			m.convID = ""
 			m.lastSentPrompt = ""
 			m.mu.Unlock()
-			log.Printf("claudeweb: API error: %v", err)
-			// Return the error as text instead of an error, so the runner
-			// does NOT retry. The runner retries on error; it stops on text.
 			yield(&model.LLMResponse{
 				Content: &genai.Content{
 					Role:  "model",
@@ -116,6 +115,10 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 
 		events := ParseSSEStream(body)
 		var textBuf strings.Builder
+		var shadowResults []string
+
+		// Track tool_use blocks by index
+		toolBlocks := map[int]*toolBlock{}
 
 		for event := range events {
 			select {
@@ -126,16 +129,26 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			}
 
 			switch event.Event {
-			case "ping", "conversation_ready", "message_limit",
-				"content_block_start", "content_block_stop", "message_delta":
+			case "ping", "conversation_ready", "message_limit", "message_delta":
 				continue
 
 			case "message_start":
 				var ev MessageStartEvent
 				if err := json.Unmarshal(event.Data, &ev); err == nil {
 					m.mu.Lock()
-					m.lastAssistantUUID = ev.Message.UUID
 					m.mu.Unlock()
+				}
+
+			case "content_block_start":
+				var ev ContentBlockStartEvent
+				if err := json.Unmarshal(event.Data, &ev); err != nil {
+					continue
+				}
+				if ev.ContentBlock.Type == "tool_use" {
+					toolBlocks[ev.Index] = &toolBlock{
+						name: ev.ContentBlock.Name,
+					}
+					log.Printf("[remote] tool_use start: %s", ev.ContentBlock.Name)
 				}
 
 			case "content_block_delta":
@@ -143,7 +156,9 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				if err := json.Unmarshal(event.Data, &ev); err != nil {
 					continue
 				}
-				if ev.Delta.Type == "text_delta" {
+
+				switch ev.Delta.Type {
+				case "text_delta":
 					textBuf.WriteString(ev.Delta.Text)
 					if stream {
 						if !yield(&model.LLMResponse{
@@ -156,10 +171,37 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 							return
 						}
 					}
+				case "input_json_delta":
+					if tb, ok := toolBlocks[ev.Index]; ok {
+						tb.inputJSON.WriteString(ev.Delta.PartialJSON)
+					}
+				}
+
+			case "content_block_stop":
+				var ev ContentBlockStopEvent
+				if err := json.Unmarshal(event.Data, &ev); err != nil {
+					continue
+				}
+				// Tool block finished → shadow execute!
+				if tb, ok := toolBlocks[ev.Index]; ok {
+					if m.Shadow != nil {
+						result := m.Shadow.Execute(tb.name, tb.inputJSON.String())
+						if result != "" {
+							shadowResults = append(shadowResults, result)
+						}
+					}
+					delete(toolBlocks, ev.Index)
 				}
 
 			case "message_stop":
 				text := textBuf.String()
+				// Append shadow execution results
+				if len(shadowResults) > 0 {
+					text += "\n\n━━━ Local Shadow Execution ━━━\n"
+					for _, r := range shadowResults {
+						text += r + "\n"
+					}
+				}
 				if text == "" {
 					text = "(empty response)"
 				}
@@ -181,7 +223,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				yield(&model.LLMResponse{
 					Content: &genai.Content{
 						Role:  "model",
-						Parts: []*genai.Part{{Text: fmt.Sprintf("[Server Error] %s", string(event.Data))}},
+						Parts: []*genai.Part{{Text: fmt.Sprintf("[Error] %s", string(event.Data))}},
 					},
 					TurnComplete: true,
 					FinishReason: genai.FinishReasonStop,
@@ -191,10 +233,17 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 		}
 
 		if textBuf.Len() > 0 {
+			text := textBuf.String()
+			if len(shadowResults) > 0 {
+				text += "\n\n━━━ Local Shadow Execution ━━━\n"
+				for _, r := range shadowResults {
+					text += r + "\n"
+				}
+			}
 			yield(&model.LLMResponse{
 				Content: &genai.Content{
 					Role:  "model",
-					Parts: []*genai.Part{{Text: textBuf.String()}},
+					Parts: []*genai.Part{{Text: text}},
 				},
 				TurnComplete: true,
 				FinishReason: genai.FinishReasonStop,
@@ -203,8 +252,6 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	}
 }
 
-// extractPrompt gets the user's NEW text from the LAST content entry only.
-// Returns "" for empty input, synthetic runner messages, or function responses.
 func (m *Model) extractPrompt(req *model.LLMRequest) string {
 	if len(req.Contents) == 0 {
 		return ""
@@ -215,10 +262,9 @@ func (m *Model) extractPrompt(req *model.LLMRequest) string {
 	}
 	for _, part := range last.Parts {
 		if part.FunctionResponse != nil {
-			return "" // tool result from runner, skip
+			return ""
 		}
 		if part.Text != "" {
-			// Skip runner's synthetic continuation message
 			if strings.HasPrefix(part.Text, "Continue processing previous") {
 				return ""
 			}

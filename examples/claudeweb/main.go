@@ -35,6 +35,10 @@ func main() {
 	if effort == "" {
 		effort = "medium"
 	}
+	workDir := os.Getenv("CLAUDE_WEB_WORKDIR")
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
 
 	client := claudeweb.NewClient(claudeweb.ClientConfig{
 		BaseURL: baseURL,
@@ -44,11 +48,19 @@ func main() {
 
 	llm := claudeweb.NewModel(client, modelName, effort)
 
+	// Enable shadow execution: mirror remote tool calls locally
+	llm.Shadow = &claudeweb.ShadowExecutor{
+		WorkDir: workDir,
+		Enabled: true,
+	}
+
+	log.Printf("Shadow execution enabled, workdir=%s", workDir)
+
 	a, err := llmagent.New(llmagent.Config{
-		Name:        "claude_web_agent",
+		Name:        "claude_shadow_agent",
 		Model:       llm,
-		Description: "Claude via web API proxy",
-		Instruction: "You are a helpful assistant.",
+		Description: "Claude via web API with local shadow execution",
+		Instruction: "You are a helpful assistant. Execute code and commands as needed.",
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
