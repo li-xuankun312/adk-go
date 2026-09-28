@@ -224,8 +224,10 @@ func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, bool, e
 		SyncSources:   []json.RawMessage{},
 	}
 
-	// Convert tools from adk-go format to web API format
-	webReq.Tools = convertTools(req.Config)
+	// TODO: Convert tools from adk-go format to web API format.
+	// For now, send empty tools to get text completion working.
+	// Tool definitions will be added once the schema format is confirmed.
+	webReq.Tools = []WebTool{}
 
 	// Find the last user message to use as prompt, or tool results
 	if len(req.Contents) == 0 {
