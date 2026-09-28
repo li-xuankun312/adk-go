@@ -54,6 +54,15 @@ type task_struct struct {
 	wait_queue chan int          // waitpid() blocks here (receives exit_code)
 	mu sync.Mutex // protects concurrent access to this task
 }
+func (t *task_struct) Ctx() context.Context    { return t.ctx }
+func (t *task_struct) Pid() int64              { return t.pid }
+func (t *task_struct) Father() int64           { return t.father }
+func (t *task_struct) State() int64            { return t.state }
+func (t *task_struct) Pwd() string             { return t.pwd }
+func (t *task_struct) SetPwd(p string)         { t.pwd = p }
+func (t *task_struct) ConvID() string          { return t.conv_id }
+func (t *task_struct) Prompt() string          { return t.prompt }
+func (t *task_struct) Result() string          { return t.result }
 var (
 	task [NR_TASKS]*task_struct
 	current *task_struct

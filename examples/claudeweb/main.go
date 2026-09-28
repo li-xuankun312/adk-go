@@ -6,19 +6,18 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
-	"sync/atomic"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/kernel"
 	"google.golang.org/adk/v2/model/claudeweb"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 )
-
-var pidCounter atomic.Int32
 
 type appConfig struct {
 	baseURL   string
@@ -29,10 +28,10 @@ type appConfig struct {
 	workDir   string
 }
 
-func main() {
-	ctx := context.Background()
+var cfg *appConfig
 
-	cfg := &appConfig{
+func main() {
+	cfg = &appConfig{
 		baseURL:   envOr("CLAUDE_WEB_BASE_URL", "https://c.aimonkey.plus"),
 		orgID:     envRequired("CLAUDE_WEB_ORG_ID"),
 		cookie:    envRequired("CLAUDE_WEB_COOKIE"),
@@ -41,23 +40,31 @@ func main() {
 		workDir:   envOr("CLAUDE_WEB_WORKDIR", mustGetwd()),
 	}
 
-	mainProc := newProcess(cfg, 0)
+	kernel.Init()
+	initTask := kernel.Current()
+	initTask.SetPwd(cfg.workDir)
 
 	fmt.Println("═══════════════════════════════════════════════")
-	fmt.Println("  Claude Shadow Agent (Process Model)")
+	fmt.Println("  Claude Shadow Agent — Linux 0.11 Process Model")
 	fmt.Printf("  Model: %s | Effort: %s\n", cfg.modelName, cfg.effort)
-	fmt.Printf("  Shadow workdir: %s\n", cfg.workDir)
+	fmt.Printf("  WorkDir: %s\n", cfg.workDir)
 	fmt.Println("─────────────────────────────────────────────")
-	fmt.Println("  /spawn <prompt>  Start a child process")
-	fmt.Println("  /new             Reset main conversation")
-	fmt.Println("  /status          Show state")
-	fmt.Println("  /quit            Exit")
-	fmt.Println("  Empty Enter      Ignored")
+	fmt.Println("  /spawn <prompt>   fork() + exec(prompt)")
+	fmt.Println("  /wait <pid>       waitpid()")
+	fmt.Println("  /kill <pid>       kill(pid, SIGKILL)")
+	fmt.Println("  /ps               show_stat()")
+	fmt.Println("  /new              reset main conversation")
+	fmt.Println("  /quit             exit")
 	fmt.Println("═══════════════════════════════════════════════")
 	fmt.Println()
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	var mainLLM *claudeweb.Model
+	var mainRunner *runner.Runner
+	var mainSessID string
+	mainLLM, mainRunner, mainSessID = newConversation("init")
 
 	for {
 		fmt.Print("You > ")
@@ -65,7 +72,6 @@ func main() {
 			break
 		}
 		input := strings.TrimSpace(scanner.Text())
-
 		if input == "" {
 			continue
 		}
@@ -75,105 +81,113 @@ func main() {
 			fmt.Println("Bye!")
 			return
 
-		case input == "/status":
-			fmt.Printf("  Main PID=0 convID=%s\n", mainProc.getConvID())
-			fmt.Printf("  Shadow workdir: %s\n", cfg.workDir)
-			fmt.Printf("  Total spawned: %d\n", pidCounter.Load())
+		case input == "/ps":
+			kernel.Ps()
 			fmt.Println()
 
 		case input == "/new":
-			mainProc = newProcess(cfg, 0)
+			mainLLM, mainRunner, mainSessID = newConversation("init")
 			fmt.Println("  ✓ Main conversation reset")
 			fmt.Println()
 
 		case strings.HasPrefix(input, "/spawn "):
-			prompt := strings.TrimPrefix(input, "/spawn ")
-			prompt = strings.TrimSpace(prompt)
+			prompt := strings.TrimSpace(strings.TrimPrefix(input, "/spawn "))
 			if prompt == "" {
 				fmt.Println("  Usage: /spawn <prompt>")
 				continue
 			}
-			pid := int(pidCounter.Add(1))
-			fmt.Printf("\n┌─ [PID=%d] Spawning child process...\n", pid)
-			child := newProcess(cfg, pid)
-			child.run(ctx, prompt, "│  ")
-			fmt.Printf("└─ [PID=%d] Child process ended\n\n", pid)
+			pid, err := kernel.Fork(prompt, cfg.workDir)
+			if err != nil {
+				fmt.Printf("  fork() failed: %v\n", err)
+				continue
+			}
+			fmt.Printf("\n┌─ [PID=%d] fork() ok, running...\n", pid)
+			go runChildProcess(pid, prompt)
+			fmt.Printf("│  (backgrounded — /wait %d to collect result)\n", pid)
+			fmt.Printf("└─\n\n")
+
+		case strings.HasPrefix(input, "/wait"):
+			args := strings.TrimSpace(strings.TrimPrefix(input, "/wait"))
+			var waitPid int64
+			if args == "" {
+				waitPid = -1
+			} else {
+				n, err := strconv.ParseInt(args, 10, 64)
+				if err != nil {
+					fmt.Printf("  Usage: /wait [pid]\n")
+					continue
+				}
+				waitPid = n
+			}
+			fmt.Printf("  waitpid(%d)...\n", waitPid)
+			childPid, code, err := kernel.Wait(waitPid)
+			if err != nil {
+				fmt.Printf("  waitpid error: %v\n", err)
+			} else {
+				fmt.Printf("  PID=%d exited with code %d\n", childPid, code)
+				result := kernel.GetResult(childPid)
+				if result != "" {
+					fmt.Printf("  Result:\n%s\n", result)
+				}
+			}
+			fmt.Println()
+
+		case strings.HasPrefix(input, "/kill "):
+			args := strings.TrimSpace(strings.TrimPrefix(input, "/kill "))
+			n, err := strconv.ParseInt(args, 10, 64)
+			if err != nil {
+				fmt.Println("  Usage: /kill <pid>")
+				continue
+			}
+			if err := kernel.Kill(n, kernel.SIGKILL); err != nil {
+				fmt.Printf("  kill() error: %v\n", err)
+			} else {
+				fmt.Printf("  kill(%d, SIGKILL) sent\n", n)
+			}
+			fmt.Println()
 
 		default:
 			fmt.Println()
-			mainProc.run(ctx, input, "")
+			runPrompt(context.Background(), mainLLM, mainRunner, mainSessID, input, "")
 			fmt.Println()
 		}
 	}
 }
 
-// process represents an independent Claude conversation with shadow execution
-type process struct {
-	pid     int
-	llm     *claudeweb.Model
-	r       *runner.Runner
-	sessID  string
-	appName string
-}
+func runChildProcess(pid int64, prompt string) {
+	llm, r, sessID := newConversation(fmt.Sprintf("pid_%d", pid))
+	kernel.SetConvID(pid, llm.ConvID())
 
-func newProcess(cfg *appConfig, pid int) *process {
-	client := claudeweb.NewClient(claudeweb.ClientConfig{
-		BaseURL: cfg.baseURL,
-		OrgID:   cfg.orgID,
-		Cookie:  cfg.cookie,
-	})
-
-	llm := claudeweb.NewModel(client, cfg.modelName, cfg.effort)
-	llm.Shadow = &claudeweb.ShadowExecutor{
-		WorkDir: cfg.workDir,
-		Enabled: true,
+	var result strings.Builder
+	ctx := context.Background()
+	t := kernel.GetTask(pid)
+	if t != nil {
+		ctx = t.Ctx()
 	}
 
-	a, err := llmagent.New(llmagent.Config{
-		Name:        fmt.Sprintf("claude_pid_%d", pid),
-		Model:       llm,
-		Description: "Claude with shadow execution",
-		Instruction: "You are a helpful assistant.",
-	})
-	if err != nil {
-		log.Fatalf("Failed to create agent: %v", err)
-	}
-
-	sessSvc := session.InMemoryService()
-	appName := fmt.Sprintf("proc_%d", pid)
-	r, err := runner.New(runner.Config{
-		AppName:        appName,
-		Agent:          a,
-		SessionService: sessSvc,
-	})
-	if err != nil {
-		log.Fatalf("Failed to create runner: %v", err)
-	}
-
-	sess, err := sessSvc.Create(context.Background(), &session.CreateRequest{
-		AppName: appName,
-		UserID:  "user",
-	})
-	if err != nil {
-		log.Fatalf("Failed to create session: %v", err)
-	}
-
-	return &process{
-		pid:     pid,
-		llm:     llm,
-		r:       r,
-		sessID:  sess.ID(),
-		appName: appName,
-	}
-}
-
-func (p *process) getConvID() string {
-	return p.llm.ConvID()
-}
-
-func (p *process) run(ctx context.Context, prompt string, prefix string) {
 	msg := genai.NewContentFromText(prompt, "user")
-	for event, err := range p.r.Run(ctx, "user", p.sessID, msg, agent.RunConfig{}) {
+	for event, err := range r.Run(ctx, "user", sessID, msg, agent.RunConfig{}) {
+		if err != nil {
+			result.WriteString(fmt.Sprintf("[Error] %v", err))
+			break
+		}
+		if event.Content() != nil {
+			for _, part := range event.Content().Parts {
+				if part.Text != "" {
+					result.WriteString(part.Text)
+				}
+			}
+		}
+	}
+
+	kernel.SetResult(pid, result.String())
+	kernel.Exit(pid, 0)
+	log.Printf("[PID=%d] process exited", pid)
+}
+
+func runPrompt(ctx context.Context, llm *claudeweb.Model, r *runner.Runner, sessID string, prompt string, prefix string) {
+	msg := genai.NewContentFromText(prompt, "user")
+	for event, err := range r.Run(ctx, "user", sessID, msg, agent.RunConfig{}) {
 		if err != nil {
 			fmt.Printf("%s[Error] %v\n", prefix, err)
 			break
@@ -192,6 +206,45 @@ func (p *process) run(ctx context.Context, prompt string, prefix string) {
 			}
 		}
 	}
+}
+
+func newConversation(name string) (*claudeweb.Model, *runner.Runner, string) {
+	client := claudeweb.NewClient(claudeweb.ClientConfig{
+		BaseURL: cfg.baseURL,
+		OrgID:   cfg.orgID,
+		Cookie:  cfg.cookie,
+	})
+	llm := claudeweb.NewModel(client, cfg.modelName, cfg.effort)
+	llm.Shadow = &claudeweb.ShadowExecutor{
+		WorkDir: cfg.workDir,
+		Enabled: true,
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name:        fmt.Sprintf("claude_%s", name),
+		Model:       llm,
+		Description: "Claude with shadow execution",
+		Instruction: "You are a helpful assistant.",
+	})
+	if err != nil {
+		log.Fatalf("agent create failed: %v", err)
+	}
+	sessSvc := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:        name,
+		Agent:          a,
+		SessionService: sessSvc,
+	})
+	if err != nil {
+		log.Fatalf("runner create failed: %v", err)
+	}
+	sess, err := sessSvc.Create(context.Background(), &session.CreateRequest{
+		AppName: name,
+		UserID:  "user",
+	})
+	if err != nil {
+		log.Fatalf("session create failed: %v", err)
+	}
+	return llm, r, sess.ID()
 }
 
 func envOr(key, fallback string) string {
