@@ -1,9 +1,6 @@
 package fs
 import (
-	"fmt"
-	"os"
 	"sync"
-	"time"
 )
 const (
 	READ  = 0

@@ -34,11 +34,11 @@ func waitpid(pid int, options int) (int, error) {
 func printk(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format, args...)
 }
-func panic(msg string) {
+func kpanic(msg string) {
 	fmt.Fprintf(os.Stderr, "Kernel panic: %s\n", msg)
 	os.Exit(1)
 }
 func Printk(format string, args ...interface{}) { printk(format, args...) }
-func Panic(msg string)                          { panic(msg) }
+func Panic(msg string) { kpanic(msg) }
 func Exit(code int)                             { _exit(code) }
 func Setsid() (int, error)                      { return setsid() }
