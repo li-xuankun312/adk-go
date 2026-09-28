@@ -14,18 +14,16 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
-// Model implements model.LLM using the claude.ai web API as backend.
 type Model struct {
 	client    *Client
 	modelName string
-	effort    string // "high", "medium", "low"
+	effort    string
 
 	mu                sync.Mutex
 	convID            string
 	lastAssistantUUID string
 }
 
-// NewModel creates a Model backed by the claude.ai web API.
 func NewModel(client *Client, modelName string, effort string) *Model {
 	if effort == "" {
 		effort = "medium"
@@ -39,15 +37,28 @@ func NewModel(client *Client, modelName string, effort string) *Model {
 
 func (m *Model) Name() string { return m.modelName }
 
-// GenerateContent implements model.LLM.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if req == nil {
 		return singleError(fmt.Errorf("claudeweb: nil request"))
 	}
 
-	webReq, isToolResult, err := m.buildRequest(req)
+	webReq, err := m.buildRequest(req)
 	if err != nil {
 		return singleError(fmt.Errorf("claudeweb: build request: %w", err))
+	}
+	// Skip sending if prompt is empty and it's not the first turn
+	// (this happens when the runner tries to send tool results for
+	// built-in tools that executed on the remote side)
+	if webReq.Prompt == "" && webReq.CreateConversationParams == nil {
+		log.Printf("claudeweb: skipping empty prompt (likely internal tool result round-trip)")
+		return singleYield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: ""}},
+			},
+			TurnComplete: true,
+			FinishReason: genai.FinishReasonStop,
+		})
 	}
 
 	m.mu.Lock()
@@ -62,13 +73,9 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			IsTemporary:                   true,
 		}
 	}
-	if isToolResult {
-		webReq.ParentMessageUUID = m.lastAssistantUUID
-	}
 	m.mu.Unlock()
 
-	log.Printf("claudeweb: sending request convID=%s prompt=%q isToolResult=%v tools=%d",
-		convID, truncate(webReq.Prompt, 50), isToolResult, len(webReq.Tools))
+	log.Printf("claudeweb: request convID=%s prompt=%q", convID, truncate(webReq.Prompt, 80))
 
 	return func(yield func(*model.LLMResponse, error) bool) {
 		body, err := m.client.Completion(convID, webReq)
@@ -79,9 +86,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 		defer body.Close()
 
 		events := ParseSSEStream(body)
-
-		var blocks []contentBlockState
-		var stopReason string
+		var textBuf strings.Builder
 
 		for event := range events {
 			select {
@@ -92,56 +97,33 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			}
 
 			switch event.Event {
-			case "ping", "conversation_ready":
+			case "ping", "conversation_ready", "message_limit":
 				continue
 
 			case "message_start":
 				var ev MessageStartEvent
-				if err := json.Unmarshal(event.Data, &ev); err != nil {
-					log.Printf("claudeweb: parse message_start: %v", err)
-					continue
+				if err := json.Unmarshal(event.Data, &ev); err == nil {
+					m.mu.Lock()
+					m.lastAssistantUUID = ev.Message.UUID
+					m.mu.Unlock()
 				}
-				m.mu.Lock()
-				m.lastAssistantUUID = ev.Message.UUID
-				m.mu.Unlock()
 
 			case "content_block_start":
-				var ev ContentBlockStartEvent
-				if err := json.Unmarshal(event.Data, &ev); err != nil {
-					log.Printf("claudeweb: parse content_block_start: %v", err)
-					continue
-				}
-				for len(blocks) <= ev.Index {
-					blocks = append(blocks, contentBlockState{})
-				}
-				blocks[ev.Index] = contentBlockState{
-					blockType: ev.ContentBlock.Type,
-					id:        ev.ContentBlock.ID,
-					name:      ev.ContentBlock.Name,
-				}
+				// We only care about text blocks; tool_use blocks
+				// from built-in tools are ignored (they execute remotely)
 
 			case "content_block_delta":
 				var ev ContentBlockDeltaEvent
 				if err := json.Unmarshal(event.Data, &ev); err != nil {
-					log.Printf("claudeweb: parse content_block_delta: %v", err)
 					continue
 				}
-				if ev.Index >= len(blocks) {
-					continue
-				}
-				block := &blocks[ev.Index]
-
-				switch ev.Delta.Type {
-				case "text_delta":
-					block.text.WriteString(ev.Delta.Text)
-					// Yield partial for streaming display
+				if ev.Delta.Type == "text_delta" {
+					textBuf.WriteString(ev.Delta.Text)
 					if stream {
 						resp := &model.LLMResponse{
 							Content: &genai.Content{
-								Role: "model",
-								Parts: []*genai.Part{
-									{Text: ev.Delta.Text},
-								},
+								Role:  "model",
+								Parts: []*genai.Part{{Text: ev.Delta.Text}},
 							},
 							Partial: true,
 						}
@@ -149,51 +131,53 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 							return
 						}
 					}
-				case "input_json_delta":
-					block.inputJSON.WriteString(ev.Delta.PartialJSON)
 				}
+				// input_json_delta from tool_use blocks: silently skip
 
 			case "content_block_stop":
-				// done
+				continue
 
 			case "message_delta":
-				var ev MessageDeltaEvent
-				if err := json.Unmarshal(event.Data, &ev); err != nil {
-					log.Printf("claudeweb: parse message_delta: %v", err)
-					continue
-				}
-				if ev.Delta.StopReason != nil {
-					stopReason = *ev.Delta.StopReason
-				}
+				// stop reason received
 
 			case "message_stop":
-				resp := buildFinalResponse(blocks, stopReason)
-				resp.TurnComplete = true
+				text := textBuf.String()
+				if text == "" {
+					text = "(no text response)"
+				}
+				resp := &model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{Text: text}},
+					},
+					TurnComplete: true,
+					FinishReason: genai.FinishReasonStop,
+				}
 				yield(resp, nil)
 				return
-
-			case "message_limit":
-				log.Printf("claudeweb: message_limit event received")
 
 			case "error":
 				yield(nil, fmt.Errorf("claudeweb: server error: %s", string(event.Data)))
 				return
-
-			default:
-				log.Printf("claudeweb: unknown event: %s", event.Event)
 			}
 		}
 
-		if len(blocks) > 0 {
-			resp := buildFinalResponse(blocks, stopReason)
-			resp.TurnComplete = true
+		// Stream ended without message_stop
+		if textBuf.Len() > 0 {
+			resp := &model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: textBuf.String()}},
+				},
+				TurnComplete: true,
+				FinishReason: genai.FinishReasonStop,
+			}
 			yield(resp, nil)
 		}
 	}
 }
 
-// buildRequest converts an adk-go LLMRequest into a web API CompletionRequest.
-func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, bool, error) {
+func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, error) {
 	webReq := &CompletionRequest{
 		Model:         m.modelName,
 		Timezone:      "Asia/Shanghai",
@@ -204,159 +188,49 @@ func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, bool, e
 		Attachments:   []json.RawMessage{},
 		Files:         []json.RawMessage{},
 		SyncSources:   []json.RawMessage{},
-		Tools:         convertTools(req.Config),
+		Tools:         []WebTool{}, // empty: let remote Claude use its own tools
 	}
 
 	if len(req.Contents) == 0 {
-		return nil, false, fmt.Errorf("no contents in request")
+		return nil, fmt.Errorf("no contents in request")
 	}
 
-	lastContent := req.Contents[len(req.Contents)-1]
-
-	// Check if the last message contains tool results (function responses)
-	var toolResults []ToolResult
-	for _, part := range lastContent.Parts {
-		if part.FunctionResponse != nil {
-			resultJSON, _ := json.Marshal(part.FunctionResponse.Response)
-			toolResults = append(toolResults, ToolResult{
-				ToolUseID: part.FunctionResponse.ID,
-				Content:   string(resultJSON),
-			})
+	// Walk contents backward to find the last real user text.
+	// Skip synthetic "Continue processing" messages and FunctionResponse.
+	var prompt string
+	for i := len(req.Contents) - 1; i >= 0; i-- {
+		c := req.Contents[i]
+		if c.Role != "user" {
+			continue
+		}
+		for _, part := range c.Parts {
+			// Skip function responses (tool results from runner)
+			if part.FunctionResponse != nil {
+				continue
+			}
+			if part.Text != "" && part.Text != "Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed." {
+				prompt = part.Text
+				break
+			}
+		}
+		if prompt != "" {
+			break
 		}
 	}
 
-	if len(toolResults) > 0 {
-		webReq.Prompt = ""
-		webReq.ToolResults = toolResults
-		return webReq, true, nil
-	}
-
-	// Normal user message: extract text from the last user content
-	var prompt strings.Builder
-	for _, part := range lastContent.Parts {
-		if part.Text != "" {
-			prompt.WriteString(part.Text)
-		}
-	}
-	webReq.Prompt = prompt.String()
-
-	return webReq, false, nil
-}
-
-// convertTools converts genai tool config to the web API tool format.
-func convertTools(config *genai.GenerateContentConfig) []WebTool {
-	if config == nil {
-		return []WebTool{}
-	}
-
-	var webTools []WebTool
-	for _, t := range config.Tools {
-		for _, fd := range t.FunctionDeclarations {
-			schema := buildInputSchema(fd.Parameters)
-			webTools = append(webTools, WebTool{
-				Name:        fd.Name,
-				Description: fd.Description,
-				InputSchema: schema,
-			})
-		}
-	}
-	if webTools == nil {
-		return []WebTool{}
-	}
-	return webTools
-}
-
-// buildInputSchema converts a genai.Schema to a JSON Schema object
-// that the web API accepts.
-func buildInputSchema(s *genai.Schema) json.RawMessage {
-	if s == nil {
-		return json.RawMessage(`{"type":"object","properties":{}}`)
-	}
-
-	schema := map[string]any{
-		"type": strings.ToLower(string(s.Type)),
-	}
-
-	if len(s.Properties) > 0 {
-		props := map[string]any{}
-		for name, prop := range s.Properties {
-			p := map[string]any{
-				"type": strings.ToLower(string(prop.Type)),
-			}
-			if prop.Description != "" {
-				p["description"] = prop.Description
-			}
-			if len(prop.Enum) > 0 {
-				p["enum"] = prop.Enum
-			}
-			props[name] = p
-		}
-		schema["properties"] = props
-	} else {
-		schema["properties"] = map[string]any{}
-	}
-
-	if len(s.Required) > 0 {
-		schema["required"] = s.Required
-	}
-
-	data, _ := json.Marshal(schema)
-	return data
-}
-
-type contentBlockState struct {
-	blockType string
-	id        string
-	name      string
-	text      strings.Builder
-	inputJSON strings.Builder
-}
-
-func buildFinalResponse(blocks []contentBlockState, stopReason string) *model.LLMResponse {
-	content := &genai.Content{
-		Role: "model",
-	}
-
-	for _, block := range blocks {
-		switch block.blockType {
-		case "text":
-			if block.text.Len() > 0 {
-				content.Parts = append(content.Parts, &genai.Part{
-					Text: block.text.String(),
-				})
-			}
-		case "tool_use":
-			args := map[string]any{}
-			if block.inputJSON.Len() > 0 {
-				_ = json.Unmarshal([]byte(block.inputJSON.String()), &args)
-			}
-			content.Parts = append(content.Parts, &genai.Part{
-				FunctionCall: &genai.FunctionCall{
-					ID:   block.id,
-					Name: block.name,
-					Args: args,
-				},
-			})
-		}
-	}
-
-	resp := &model.LLMResponse{Content: content}
-
-	switch stopReason {
-	case "end_turn":
-		resp.FinishReason = genai.FinishReasonStop
-	case "tool_use":
-		resp.FinishReason = genai.FinishReasonStop
-	case "max_tokens":
-		resp.FinishReason = genai.FinishReasonMaxTokens
-	}
-
-	return resp
+	webReq.Prompt = prompt
+	return webReq, nil
 }
 
 func singleError(err error) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		yield(nil, err)
+	}
+}
+
+func singleYield(resp *model.LLMResponse) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(resp, nil)
 	}
 }
 
