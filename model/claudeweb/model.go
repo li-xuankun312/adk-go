@@ -22,6 +22,7 @@ type Model struct {
 	mu                sync.Mutex
 	convID            string
 	lastAssistantUUID string
+	lastSentPrompt    string // prevent re-sending the same prompt
 }
 
 func NewModel(client *Client, modelName string, effort string) *Model {
@@ -39,33 +40,47 @@ func (m *Model) Name() string { return m.modelName }
 
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if req == nil {
-		return singleError(fmt.Errorf("claudeweb: nil request"))
+		return emptyResponse()
 	}
 
-	webReq, err := m.buildRequest(req)
-	if err != nil {
-		return singleError(fmt.Errorf("claudeweb: build request: %w", err))
-	}
-	// Skip sending if prompt is empty and it's not the first turn
-	// (this happens when the runner tries to send tool results for
-	// built-in tools that executed on the remote side)
-	if webReq.Prompt == "" && webReq.CreateConversationParams == nil {
-		log.Printf("claudeweb: skipping empty prompt (likely internal tool result round-trip)")
-		return singleYield(&model.LLMResponse{
-			Content: &genai.Content{
-				Role:  "model",
-				Parts: []*genai.Part{{Text: ""}},
-			},
-			TurnComplete: true,
-			FinishReason: genai.FinishReasonStop,
-		})
+	prompt := m.extractPrompt(req)
+
+	// Nothing to send: empty input, synthetic runner message, or duplicate
+	if prompt == "" {
+		log.Printf("claudeweb: skip (empty/synthetic prompt)")
+		return emptyResponse()
 	}
 
 	m.mu.Lock()
+	if prompt == m.lastSentPrompt {
+		m.mu.Unlock()
+		log.Printf("claudeweb: skip (duplicate prompt)")
+		return emptyResponse()
+	}
+	m.lastSentPrompt = prompt
+
 	convID := m.convID
-	if convID == "" {
+	isNewConv := convID == ""
+	if isNewConv {
 		convID = generateUUID()
 		m.convID = convID
+	}
+	m.mu.Unlock()
+
+	webReq := &CompletionRequest{
+		Prompt:        prompt,
+		Model:         m.modelName,
+		Timezone:      "Asia/Shanghai",
+		Locale:        "en-US",
+		Effort:        m.effort,
+		ThinkingMode:  "off",
+		RenderingMode: "messages",
+		Attachments:   []json.RawMessage{},
+		Files:         []json.RawMessage{},
+		SyncSources:   []json.RawMessage{},
+		Tools:         []WebTool{},
+	}
+	if isNewConv {
 		webReq.CreateConversationParams = &CreateConversationParams{
 			Name:                          "",
 			Model:                         m.modelName,
@@ -73,14 +88,28 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			IsTemporary:                   true,
 		}
 	}
-	m.mu.Unlock()
 
-	log.Printf("claudeweb: request convID=%s prompt=%q", convID, truncate(webReq.Prompt, 80))
+	log.Printf("claudeweb: → convID=%s prompt=%q", convID[:8], truncate(prompt, 60))
 
 	return func(yield func(*model.LLMResponse, error) bool) {
 		body, err := m.client.Completion(convID, webReq)
 		if err != nil {
-			yield(nil, err)
+			// On error, reset state so next real input creates a fresh conversation
+			m.mu.Lock()
+			m.convID = ""
+			m.lastSentPrompt = ""
+			m.mu.Unlock()
+			log.Printf("claudeweb: API error: %v", err)
+			// Return the error as text instead of an error, so the runner
+			// does NOT retry. The runner retries on error; it stops on text.
+			yield(&model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: fmt.Sprintf("[API Error] %v", err)}},
+				},
+				TurnComplete: true,
+				FinishReason: genai.FinishReasonStop,
+			}, nil)
 			return
 		}
 		defer body.Close()
@@ -97,7 +126,8 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			}
 
 			switch event.Event {
-			case "ping", "conversation_ready", "message_limit":
+			case "ping", "conversation_ready", "message_limit",
+				"content_block_start", "content_block_stop", "message_delta":
 				continue
 
 			case "message_start":
@@ -108,10 +138,6 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 					m.mu.Unlock()
 				}
 
-			case "content_block_start":
-				// We only care about text blocks; tool_use blocks
-				// from built-in tools are ignored (they execute remotely)
-
 			case "content_block_delta":
 				var ev ContentBlockDeltaEvent
 				if err := json.Unmarshal(event.Data, &ev); err != nil {
@@ -120,117 +146,98 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				if ev.Delta.Type == "text_delta" {
 					textBuf.WriteString(ev.Delta.Text)
 					if stream {
-						resp := &model.LLMResponse{
+						if !yield(&model.LLMResponse{
 							Content: &genai.Content{
 								Role:  "model",
 								Parts: []*genai.Part{{Text: ev.Delta.Text}},
 							},
 							Partial: true,
-						}
-						if !yield(resp, nil) {
+						}, nil) {
 							return
 						}
 					}
 				}
-				// input_json_delta from tool_use blocks: silently skip
-
-			case "content_block_stop":
-				continue
-
-			case "message_delta":
-				// stop reason received
 
 			case "message_stop":
 				text := textBuf.String()
 				if text == "" {
-					text = "(no text response)"
+					text = "(empty response)"
 				}
-				resp := &model.LLMResponse{
+				yield(&model.LLMResponse{
 					Content: &genai.Content{
 						Role:  "model",
 						Parts: []*genai.Part{{Text: text}},
 					},
 					TurnComplete: true,
 					FinishReason: genai.FinishReasonStop,
-				}
-				yield(resp, nil)
+				}, nil)
 				return
 
 			case "error":
-				yield(nil, fmt.Errorf("claudeweb: server error: %s", string(event.Data)))
+				m.mu.Lock()
+				m.convID = ""
+				m.lastSentPrompt = ""
+				m.mu.Unlock()
+				yield(&model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{Text: fmt.Sprintf("[Server Error] %s", string(event.Data))}},
+					},
+					TurnComplete: true,
+					FinishReason: genai.FinishReasonStop,
+				}, nil)
 				return
 			}
 		}
 
-		// Stream ended without message_stop
 		if textBuf.Len() > 0 {
-			resp := &model.LLMResponse{
+			yield(&model.LLMResponse{
 				Content: &genai.Content{
 					Role:  "model",
 					Parts: []*genai.Part{{Text: textBuf.String()}},
 				},
 				TurnComplete: true,
 				FinishReason: genai.FinishReasonStop,
-			}
-			yield(resp, nil)
+			}, nil)
 		}
 	}
 }
 
-func (m *Model) buildRequest(req *model.LLMRequest) (*CompletionRequest, error) {
-	webReq := &CompletionRequest{
-		Model:         m.modelName,
-		Timezone:      "Asia/Shanghai",
-		Locale:        "en-US",
-		Effort:        m.effort,
-		ThinkingMode:  "off",
-		RenderingMode: "messages",
-		Attachments:   []json.RawMessage{},
-		Files:         []json.RawMessage{},
-		SyncSources:   []json.RawMessage{},
-		Tools:         []WebTool{}, // empty: let remote Claude use its own tools
-	}
-
+// extractPrompt gets the user's NEW text from the LAST content entry only.
+// Returns "" for empty input, synthetic runner messages, or function responses.
+func (m *Model) extractPrompt(req *model.LLMRequest) string {
 	if len(req.Contents) == 0 {
-		return nil, fmt.Errorf("no contents in request")
+		return ""
 	}
-
-	// Walk contents backward to find the last real user text.
-	// Skip synthetic "Continue processing" messages and FunctionResponse.
-	var prompt string
-	for i := len(req.Contents) - 1; i >= 0; i-- {
-		c := req.Contents[i]
-		if c.Role != "user" {
-			continue
+	last := req.Contents[len(req.Contents)-1]
+	if last.Role != "user" {
+		return ""
+	}
+	for _, part := range last.Parts {
+		if part.FunctionResponse != nil {
+			return "" // tool result from runner, skip
 		}
-		for _, part := range c.Parts {
-			// Skip function responses (tool results from runner)
-			if part.FunctionResponse != nil {
-				continue
+		if part.Text != "" {
+			// Skip runner's synthetic continuation message
+			if strings.HasPrefix(part.Text, "Continue processing previous") {
+				return ""
 			}
-			if part.Text != "" && part.Text != "Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed." {
-				prompt = part.Text
-				break
-			}
-		}
-		if prompt != "" {
-			break
+			return part.Text
 		}
 	}
-
-	webReq.Prompt = prompt
-	return webReq, nil
+	return ""
 }
 
-func singleError(err error) iter.Seq2[*model.LLMResponse, error] {
+func emptyResponse() iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(nil, err)
-	}
-}
-
-func singleYield(resp *model.LLMResponse) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(resp, nil)
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: ""}},
+			},
+			TurnComplete: true,
+			FinishReason: genai.FinishReasonStop,
+		}, nil)
 	}
 }
 
