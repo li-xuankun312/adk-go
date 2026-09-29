@@ -1,12 +1,9 @@
-// chr_drv/tty_ioctl.go — ported from linux-0.11/kernel/chr_drv/tty_ioctl.c
-// (C) 1991 Linus Torvalds
 package chr_drv
 
 import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// ioctl command constants
 const (
 	TCGETS    = 0x5401
 	TCSETS    = 0x5402
@@ -40,37 +37,30 @@ const (
 	NCC       = 8
 )
 
-// tty_ioctl.c lines 18-22: baud rate quotients (for reference)
 var quotient = [16]uint16{
 	0, 2304, 1536, 1047, 857,
 	768, 576, 384, 192, 96,
 	64, 48, 24, 12, 6, 3,
 }
 
-// tty_ioctl.c lines 24-37: change_speed — no-op in Go
 func changeSpeed(tty *TtyStruct) {}
 
-// tty_ioctl.c lines 39-44: flush
 func flushQueue(queue *TtyQueue) { queue.Head = queue.Tail }
 
-// tty_ioctl.c lines 46-54: stubs
 func waitUntilSent(tty *TtyStruct) {}
 func sendBreak(tty *TtyStruct)     {}
 
-// tty_ioctl.c lines 56-64: get_termios
 func getTermios(tty *TtyStruct, out *Termios) int {
 	*out = tty.Termios
 	return 0
 }
 
-// tty_ioctl.c lines 66-74: set_termios
 func setTermios(tty *TtyStruct, in *Termios) int {
 	tty.Termios = *in
 	changeSpeed(tty)
 	return 0
 }
 
-// tty_ioctl.c lines 115-204: tty_ioctl
 func TtyIoctl(dev, cmd, arg int) int {
 	var ttyNr int
 	if int(MAJOR(uint32(dev))) == 5 {
@@ -83,7 +73,7 @@ func TtyIoctl(dev, cmd, arg int) int {
 	tty := &TtyTable[ttyNr]
 	switch cmd {
 	case TCGETS:
-		return getTermios(tty, &Termios{}) // simplified
+		return getTermios(tty, &Termios{})
 	case TCSETSF:
 		flushQueue(&tty.ReadQ)
 		fallthrough
@@ -91,9 +81,9 @@ func TtyIoctl(dev, cmd, arg int) int {
 		waitUntilSent(tty)
 		fallthrough
 	case TCSETS:
-		return 0 // simplified
+		return 0
 	case TCGETA:
-		return 0 // simplified
+		return 0
 	case TCSETAF:
 		flushQueue(&tty.ReadQ)
 		fallthrough
@@ -101,7 +91,7 @@ func TtyIoctl(dev, cmd, arg int) int {
 		waitUntilSent(tty)
 		fallthrough
 	case TCSETA:
-		return 0 // simplified
+		return 0
 	case TCSBRK:
 		if arg == 0 { waitUntilSent(tty); sendBreak(tty) }
 		return 0

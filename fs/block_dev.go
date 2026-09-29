@@ -1,12 +1,9 @@
-// fs/block_dev.go — ported from linux-0.11/fs/block_dev.c
-// (C) 1991 Linus Torvalds
 package fs
 
 import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// block_dev.c lines 14-45: block_write
 func BlockWrite(dev int, pos *int64, buf []byte, count int) int {
 	block := int(*pos >> BLOCK_SIZE_BITS)
 	offset := int(*pos) & (BLOCK_SIZE - 1)
@@ -44,7 +41,6 @@ func BlockWrite(dev int, pos *int64, buf []byte, count int) int {
 	return written
 }
 
-// block_dev.c lines 47-73: block_read
 func BlockRead(dev int, pos *int64, buf []byte, count int) int {
 	block := int(*pos >> BLOCK_SIZE_BITS)
 	offset := int(*pos) & (BLOCK_SIZE - 1)

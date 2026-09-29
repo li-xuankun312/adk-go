@@ -1,12 +1,3 @@
-// kernel/api.go — High-level API facade for claudeweb/main.go
-//
-// Bridges the Linux 0.11 kernel internals (sched.go, fork.go, exit.go, etc.)
-// with the Go-friendly API that the Claude shadow agent needs:
-//   Init(), Fork(prompt, pwd), Wait(pid), Kill(pid, sig), Ps(),
-//   Current(), GetTask(pid), SetConvID, SetResult, GetResult, etc.
-//
-// This file adds Go-specific fields (result, conv_id, pwd, ctx) to the
-// task management layer without modifying the core Linux 0.11 structs.
 package kernel
 
 import (
@@ -17,14 +8,10 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// Re-export constants that claudeweb/main.go references as kernel.XXX.
-// Dot-imported names from include are available inside kernel/ but
-// are not re-exported to other packages, so we explicitly alias them.
 const (
-	SIG_KILL int64 = 9  // kernel.SIG_KILL for claudeweb Kill() calls
+	SIG_KILL int64 = 9
 )
 
-// Extended task metadata (Go-specific, not part of Linux 0.11)
 type TaskMeta struct {
 	Prompt string
 	Pwd    string
@@ -35,7 +22,7 @@ type TaskMeta struct {
 }
 
 var (
-	taskMeta   = make(map[int64]*TaskMeta) // pid → metadata
+	taskMeta   = make(map[int64]*TaskMeta)
 	metaMu     sync.Mutex
 	nextPid    int64 = 1
 	pidMu      sync.Mutex
@@ -60,10 +47,8 @@ func getMeta(pid int64) *TaskMeta {
 	return m
 }
 
-// Init initializes the kernel scheduler and sets up task 0
 func Init() {
 	SchedInit()
-	// Set up task 0 (the idle/init task)
 	if Task[0] == nil {
 		Task[0] = &TaskStruct{}
 	}
@@ -75,11 +60,9 @@ func Init() {
 	taskMeta[0] = &TaskMeta{Pwd: "."}
 }
 
-// Fork creates a new task with a prompt
 func Fork(prompt string, pwd string) (int64, error) {
 	pid := allocPid()
-	
-	// Find a free slot in Task[]
+
 	schedMu.Lock()
 	slot := -1
 	for i := 1; i < NR_TASKS; i++ {
@@ -92,10 +75,9 @@ func Fork(prompt string, pwd string) (int64, error) {
 		schedMu.Unlock()
 		return 0, fmt.Errorf("fork: no free task slots")
 	}
-	
-	// Create the new task
+
 	child := &TaskStruct{}
-	*child = *Current // copy parent
+	*child = *Current
 	child.Pid = int32(pid)
 	child.Father = Current.Pid
 	child.State = TASK_RUNNING
@@ -105,11 +87,10 @@ func Fork(prompt string, pwd string) (int64, error) {
 	child.Alarm = 0
 	child.Leader = 0
 	child.UsedMath = 0
-	
+
 	Task[slot] = child
 	schedMu.Unlock()
-	
-	// Set up Go-specific metadata
+
 	ctx, cancel := context.WithCancel(context.Background())
 	metaMu.Lock()
 	taskMeta[pid] = &TaskMeta{
@@ -119,15 +100,14 @@ func Fork(prompt string, pwd string) (int64, error) {
 		Cancel: cancel,
 	}
 	metaMu.Unlock()
-	
+
 	return pid, nil
 }
 
-// Exit marks a task as zombie
 func Exit(pid int64, code int) {
 	schedMu.Lock()
 	defer schedMu.Unlock()
-	
+
 	for i := 1; i < NR_TASKS; i++ {
 		if Task[i] != nil && int64(Task[i].Pid) == pid {
 			Task[i].State = TASK_ZOMBIE
@@ -137,11 +117,10 @@ func Exit(pid int64, code int) {
 	}
 }
 
-// Wait waits for a child process (or any child if pid == -1)
 func Wait(pid int64) (int64, int, error) {
 	schedMu.Lock()
 	defer schedMu.Unlock()
-	
+
 	for i := 1; i < NR_TASKS; i++ {
 		t := Task[i]
 		if t == nil { continue }
@@ -153,15 +132,12 @@ func Wait(pid int64) (int64, int, error) {
 			return childPid, code, nil
 		}
 	}
-	
-	// Look for any non-zombie child we should wait on
+
 	for i := 1; i < NR_TASKS; i++ {
 		t := Task[i]
 		if t == nil { continue }
 		if pid >= 0 && int64(t.Pid) != pid { continue }
-		// Child exists but hasn't exited yet
 		schedMu.Unlock()
-		// Busy-wait (simplified; real kernel would use sleep_on)
 		for {
 			schedMu.Lock()
 			if Task[i] == nil || Task[i].State == TASK_ZOMBIE {
@@ -176,23 +152,20 @@ func Wait(pid int64) (int64, int, error) {
 				return 0, 0, fmt.Errorf("wait: child disappeared")
 			}
 			schedMu.Unlock()
-			// yield
 			Schedule()
 		}
 	}
-	
+
 	return 0, 0, fmt.Errorf("wait: no children")
 }
 
-// Kill sends a signal to a process
 func Kill(pid int64, sig int64) error {
 	schedMu.Lock()
 	defer schedMu.Unlock()
-	
+
 	for i := 0; i < NR_TASKS; i++ {
 		if Task[i] != nil && int64(Task[i].Pid) == pid {
 			Task[i].Signal |= 1 << uint(sig-1)
-			// If SIGKILL, also cancel Go context
 			if sig == int64(SIGKILL) {
 				metaMu.Lock()
 				if m, ok := taskMeta[pid]; ok && m.Cancel != nil {
@@ -206,11 +179,10 @@ func Kill(pid int64, sig int64) error {
 	return fmt.Errorf("kill: no such process %d", pid)
 }
 
-// Ps prints the process table
 func Ps() {
 	schedMu.Lock()
 	defer schedMu.Unlock()
-	
+
 	fmt.Printf("  %-6s %-6s %-10s %-8s %s\n", "PID", "PPID", "STATE", "CONVID", "PROMPT")
 	fmt.Printf("  %-6s %-6s %-10s %-8s %s\n", "---", "----", "-----", "------", "------")
 	for i := 0; i < NR_TASKS; i++ {
@@ -240,7 +212,6 @@ func Ps() {
 	}
 }
 
-// GetTask returns the task struct for a pid
 func GetTask(pid int64) *TaskStruct {
 	schedMu.Lock()
 	defer schedMu.Unlock()
@@ -252,31 +223,25 @@ func GetTask(pid int64) *TaskStruct {
 	return nil
 }
 
-// Current returns the current task (API for claudeweb; shadows include.Current variable)
-// Note: the include package has a `Current` variable, and this function
-// provides the claudeweb-compatible `kernel.Current()` call.
 func GetCurrent() *TaskStruct {
 	schedMu.Lock()
 	defer schedMu.Unlock()
 	return Current
 }
 
-// SetPwd sets the working directory for a task
-func (t *TaskStruct) SetPwd(pwd string) {
+func SetPwd(t *TaskStruct, pwd string) {
 	pid := int64(t.Pid)
 	m := getMeta(pid)
 	m.Pwd = pwd
 }
 
-// GetPwd returns the working directory
-func (t *TaskStruct) GetPwd() string {
+func GetPwd(t *TaskStruct) string {
 	pid := int64(t.Pid)
 	m := getMeta(pid)
 	return m.Pwd
 }
 
-// Ctx returns the context for the task
-func (t *TaskStruct) Ctx() context.Context {
+func TaskCtx(t *TaskStruct) context.Context {
 	pid := int64(t.Pid)
 	metaMu.Lock()
 	defer metaMu.Unlock()
@@ -286,19 +251,16 @@ func (t *TaskStruct) Ctx() context.Context {
 	return context.Background()
 }
 
-// SetConvID stores the conversation ID for a task
 func SetConvID(pid int64, convID string) {
 	m := getMeta(pid)
 	m.ConvID = convID
 }
 
-// SetResult stores the result of a task
 func SetResult(pid int64, result string) {
 	m := getMeta(pid)
 	m.Result = result
 }
 
-// GetResult retrieves the result
 func GetResult(pid int64) string {
 	metaMu.Lock()
 	defer metaMu.Unlock()
@@ -308,7 +270,6 @@ func GetResult(pid int64) string {
 	return ""
 }
 
-// SetStartupTime sets the kernel boot timestamp
 func SetStartupTime(t int64) {
 	StartupTime = int32(t)
 }

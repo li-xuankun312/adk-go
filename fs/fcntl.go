@@ -1,12 +1,9 @@
-// fs/fcntl.go — ported from linux-0.11/fs/fcntl.c
-// (C) 1991 Linus Torvalds
 package fs
 
 import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// fcntl constants
 const (
 	F_DUPFD  = 0
 	F_GETFD  = 1
@@ -17,10 +14,8 @@ const (
 	F_SETLK  = 6
 	F_SETLKW = 7
 	O_NONBLOCK = 04000
-	EMFILE   = 24
 )
 
-// fcntl.c lines 74-90: dupfd
 func dupfd(fd, arg uint32) int {
 	if fd >= NR_OPEN || Current.Filp[fd] == nil { return -EBADF }
 	if arg >= NR_OPEN { return -EINVAL_FS }
@@ -35,18 +30,15 @@ func dupfd(fd, arg uint32) int {
 	return int(arg)
 }
 
-// fcntl.c lines 92-96: sys_dup2
 func SysDup2(oldfd, newfd uint32) int {
 	SysCloseFS(int(newfd))
 	return dupfd(oldfd, newfd)
 }
 
-// fcntl.c lines 98-101: sys_dup
 func SysDup(fildes uint32) int {
 	return dupfd(fildes, 0)
 }
 
-// fcntl.c lines 103-131: sys_fcntl
 func SysFcntl(fd, cmd uint32, arg uint32) int {
 	if fd >= NR_OPEN || Current.Filp[fd] == nil { return -EBADF }
 	filp := Current.Filp[fd]

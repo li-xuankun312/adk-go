@@ -1,5 +1,3 @@
-// fs/file_dev.go — ported from linux-0.11/fs/file_dev.c
-// (C) 1991 Linus Torvalds
 package fs
 
 import (
@@ -8,7 +6,6 @@ import (
 
 const O_APPEND = 02000
 
-// file_dev.c lines 17-46: file_read
 func FileRead(inode *MInode, filp *File, buf []byte, count int) int {
 	left := count
 	if left <= 0 { return 0 }
@@ -45,7 +42,6 @@ func FileRead(inode *MInode, filp *File, buf []byte, count int) int {
 	return -1
 }
 
-// file_dev.c lines 48-89: file_write
 func FileWrite(inode *MInode, filp *File, buf []byte, count int) int {
 	var pos int64
 	if filp.FFlags&uint16(O_APPEND) != 0 {

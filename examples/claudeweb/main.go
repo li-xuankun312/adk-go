@@ -42,7 +42,7 @@ func main() {
 
 	kernel.Init()
 	initTask := kernel.GetCurrent()
-	initTask.SetPwd(cfg.workDir)
+	kernel.SetPwd(initTask, cfg.workDir)
 
 	fmt.Println("═══════════════════════════════════════════════")
 	fmt.Println("  Claude Shadow Agent — Linux 0.11 Process Model")
@@ -162,7 +162,7 @@ func runChildProcess(pid int64, prompt string) {
 	ctx := context.Background()
 	t := kernel.GetTask(pid)
 	if t != nil {
-		ctx = t.Ctx()
+		ctx = kernel.TaskCtx(t)
 	}
 
 	msg := genai.NewContentFromText(prompt, "user")

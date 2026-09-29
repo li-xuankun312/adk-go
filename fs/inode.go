@@ -1,5 +1,3 @@
-// fs/inode.go — ported from linux-0.11/fs/inode.c
-// (C) 1991 Linus Torvalds
 package fs
 
 import (
@@ -10,15 +8,12 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// inode.c line 15: struct m_inode inode_table[NR_INODE]
 var InodeTable [NR_INODE]MInode
 
-// inode.c line 197: static struct m_inode * last_inode = inode_table
 var lastInodeIdx int
 
-var inodeMu sync.Mutex // replaces cli/sti
+var inodeMu sync.Mutex
 
-// Callbacks for cross-package calls
 var (
 	getFrePageFn func() uint32
 	freePageFn   func(uint32)
@@ -27,7 +22,6 @@ var (
 func SetGetFreePage(fn func() uint32) { getFrePageFn = fn }
 func SetFreePage(fn func(uint32))     { freePageFn = fn }
 
-// inode.c lines 20-26: wait_on_inode
 func waitOnInode(inode *MInode) {
 	inodeMu.Lock()
 	for inode.ILock != 0 {
@@ -40,7 +34,6 @@ func waitOnInode(inode *MInode) {
 	inodeMu.Unlock()
 }
 
-// inode.c lines 28-35: lock_inode
 func lockInode(inode *MInode) {
 	inodeMu.Lock()
 	for inode.ILock != 0 {
@@ -54,7 +47,6 @@ func lockInode(inode *MInode) {
 	inodeMu.Unlock()
 }
 
-// inode.c lines 37-41: unlock_inode
 func unlockInode(inode *MInode) {
 	inode.ILock = 0
 	if wakeUpFn != nil {
@@ -62,7 +54,6 @@ func unlockInode(inode *MInode) {
 	}
 }
 
-// inode.c lines 43-57: invalidate_inodes
 func InvalidateInodes(dev int) {
 	for i := 0; i < NR_INODE; i++ {
 		inode := &InodeTable[i]
@@ -77,10 +68,8 @@ func InvalidateInodes(dev int) {
 	}
 }
 
-// inode.c lines 59-70: sync_inodes
 func SyncInodes() {
 	if syncInodesFn != nil {
-		// Use override if set
 		syncInodesFn()
 		return
 	}
@@ -93,13 +82,8 @@ func SyncInodes() {
 	}
 }
 
-// INODES_PER_BLOCK: sizeof(d_inode) in Linux 0.11 is 32 bytes
-// BLOCK_SIZE / 32 = 32
 const INODES_PER_BLOCK = BLOCK_SIZE / 32
 
-// inode.c lines 72-138: _bmap
-// Maps logical block number to physical block number.
-// If create is true, allocates new blocks as needed.
 func bmap_internal(inode *MInode, block int, create int) int {
 	if block < 0 {
 		log.Printf("fs: _bmap: block<0")
@@ -109,7 +93,6 @@ func bmap_internal(inode *MInode, block int, create int) int {
 		log.Printf("fs: _bmap: block>big")
 		return 0
 	}
-	// Direct blocks (0-6)
 	if block < 7 {
 		if create != 0 && inode.IZone[block] == 0 {
 			nb := NewBlock(int(inode.IDev))
@@ -121,7 +104,6 @@ func bmap_internal(inode *MInode, block int, create int) int {
 		}
 		return int(inode.IZone[block])
 	}
-	// Indirect block (7-518)
 	block -= 7
 	if block < 512 {
 		if create != 0 && inode.IZone[7] == 0 {
@@ -147,7 +129,6 @@ func bmap_internal(inode *MInode, block int, create int) int {
 		Brelse(bh)
 		return i
 	}
-	// Double indirect block (519+)
 	block -= 512
 	if create != 0 && inode.IZone[8] == 0 {
 		nb := NewBlock(int(inode.IDev))
@@ -186,20 +167,16 @@ func bmap_internal(inode *MInode, block int, create int) int {
 	return i
 }
 
-// inode.c lines 140-143: bmap
 func Bmap(inode *MInode, block int) int {
 	return bmap_internal(inode, block, 0)
 }
 
-// inode.c lines 145-148: create_block
 func CreateBlock(inode *MInode, block int) int {
 	return bmap_internal(inode, block, 1)
 }
 
-// S_ISBLK: check if mode indicates block device
 func S_ISBLK(mode uint16) bool { return (mode & 0xF000) == 0x6000 }
 
-// inode.c lines 150-192: iput
 func Iput(inode *MInode) {
 	if inode == nil { return }
 	waitOnInode(inode)
@@ -243,7 +220,6 @@ repeat:
 	inode.ICount--
 }
 
-// inode.c lines 194-226: get_empty_inode
 func GetEmptyInode() *MInode {
 	for {
 		var inode *MInode
@@ -267,14 +243,12 @@ func GetEmptyInode() *MInode {
 			waitOnInode(inode)
 		}
 		if inode.ICount != 0 { continue }
-		// memset(inode, 0, sizeof(*inode))
 		*inode = MInode{}
 		inode.ICount = 1
 		return inode
 	}
 }
 
-// inode.c lines 228-242: get_pipe_inode
 func GetPipeInode() *MInode {
 	inode := GetEmptyInode()
 	if inode == nil { return nil }
@@ -285,14 +259,13 @@ func GetPipeInode() *MInode {
 		return nil
 	}
 	inode.ISize = page
-	inode.ICount = 2 // sum of readers/writers
-	inode.IZone[0] = 0 // PIPE_HEAD
-	inode.IZone[1] = 0 // PIPE_TAIL
+	inode.ICount = 2
+	inode.IZone[0] = 0
+	inode.IZone[1] = 0
 	inode.IPipe = 1
 	return inode
 }
 
-// inode.c lines 244-292: iget
 func Iget(dev, nr int) *MInode {
 	if dev == 0 {
 		log.Printf("fs: iget with dev==0")
@@ -306,17 +279,17 @@ func Iget(dev, nr int) *MInode {
 		}
 		waitOnInode(inode)
 		if inode.IDev != uint16(dev) || inode.INum != uint16(nr) {
-			i = -1 // restart
+			i = -1
 			continue
 		}
 		inode.ICount++
 		if inode.IMount != 0 {
 			for j := 0; j < NR_SUPER; j++ {
-				if SuperBlockTable[j].SImount == inode { 
+				if SuperBlockTable[j].SImount == inode {
 					Iput(inode)
 					dev = int(SuperBlockTable[j].SDev)
 					nr = ROOT_INO
-					i = -1 // restart
+					i = -1
 					break
 				}
 			}
@@ -336,7 +309,6 @@ func Iget(dev, nr int) *MInode {
 	return inode
 }
 
-// inode.c lines 294-312: read_inode
 func readInode(inode *MInode) {
 	lockInode(inode)
 	sb := GetSuper(int(inode.IDev))
@@ -353,9 +325,8 @@ func readInode(inode *MInode) {
 		unlockInode(inode)
 		return
 	}
-	// Read d_inode from buffer
 	idx := (int(inode.INum) - 1) % INODES_PER_BLOCK
-	offset := idx * 32 // sizeof(d_inode) = 32
+	offset := idx * 32
 	if offset+32 <= len(bh.BData) {
 		inode.IMode = binary.LittleEndian.Uint16(bh.BData[offset:])
 		inode.IUid = binary.LittleEndian.Uint16(bh.BData[offset+2:])
@@ -371,7 +342,6 @@ func readInode(inode *MInode) {
 	unlockInode(inode)
 }
 
-// inode.c lines 314-338: write_inode
 func writeInode(inode *MInode) {
 	lockInode(inode)
 	if inode.IDirt == 0 || inode.IDev == 0 {

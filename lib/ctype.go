@@ -1,19 +1,14 @@
-// lib/ctype.go — ported from linux-0.11/lib/ctype.c
-// (C) 1991 Linus Torvalds
 package lib
 
-// Character classification — Go provides unicode, but we reproduce the
-// C library interface for fidelity.
-
 const (
-	_U = 0x01 // upper
-	_L = 0x02 // lower
-	_D = 0x04 // digit
-	_C = 0x08 // cntrl
-	_P = 0x10 // punct
-	_S = 0x20 // white space (space/lf/tab)
-	_X = 0x40 // hex digit
-	_SP = 0x80 // hard space (0x20)
+	_U = 0x01
+	_L = 0x02
+	_D = 0x04
+	_C = 0x08
+	_P = 0x10
+	_S = 0x20
+	_X = 0x40
+	_SP = 0x80
 )
 
 func IsUpper(c byte) bool  { return c >= 'A' && c <= 'Z' }
