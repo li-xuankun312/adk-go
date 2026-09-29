@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	exec2 "os/exec"
 	"strconv"
 	"strings"
 
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/chr_drv"
 	"google.golang.org/adk/v2/fs"
+	init011 "google.golang.org/adk/v2/init"
 	"google.golang.org/adk/v2/kernel"
 	"google.golang.org/adk/v2/model/claudeweb"
 	"google.golang.org/adk/v2/runner"
@@ -42,34 +44,29 @@ func main() {
 		workDir:   envOr("CLAUDE_WEB_WORKDIR", mustGetwd()),
 	}
 
+	fmt.Println("einsteinOS v0.11-go booting...")
+
 	kernel.Init()
+	kernel.SyscallInit()
 	initTask := kernel.GetCurrent()
 	kernel.SetPwd(initTask, cfg.workDir)
-	kernel.NewCOWContext(0)
+	kernel.SetTokenBudget(0, 500000)
+	kernel.SetContextLimit(0, 200000)
+	kernel.SetEffort(0, kernel.EFFORT_MEDIUM)
+	kernel.SetAgentCaps(0, kernel.CAP_ALL)
+
+	cowCtx0 := kernel.NewCOWContext(0)
+	cowCtx0.Append(fmt.Sprintf("system: model=%s effort=%s", cfg.modelName, cfg.effort))
 	chr_drv.GetAgentTty(0)
 
-	fmt.Println("═══════════════════════════════════════════════")
-	fmt.Println("  Claude Shadow Agent — Linux 0.11 Process Model")
-	fmt.Printf("  Model: %s | Effort: %s\n", cfg.modelName, cfg.effort)
-	fmt.Printf("  WorkDir: %s\n", cfg.workDir)
-	fmt.Println("─────────────────────────────────────────────")
-	fmt.Println("  /spawn <prompt>   fork() + exec(prompt)")
-	fmt.Println("  /wait <pid>       waitpid()")
-	fmt.Println("  /kill <pid>       kill(pid, SIGKILL)")
-	fmt.Println("  /ps               show_stat()")
-	fmt.Println("  /new              reset main conversation")
-	fmt.Println("  /top              token budget overview")
-	fmt.Println("  /budget <pid> <n> set token budget")
-	fmt.Println("  /effort <pid> l|m|h set effort level")
-	fmt.Println("  /pipe <from> <to> create agent pipe")
-	fmt.Println("  /exec <pid> <prompt> swap agent system prompt")
-	fmt.Println("  /tty <pid> raw|cooked set I/O mode")
-	fmt.Println("  /cache              prompt cache stats")
-	fmt.Println("  /ctx <pid>          context COW stats")
-	fmt.Println("  /artifact ls        list artifacts")
-	fmt.Println("  /artifact cat <n>   read artifact")
-	fmt.Println("  /quit             exit")
-	fmt.Println("═══════════════════════════════════════════════")
+	sessID0 := fmt.Sprintf("init_%d", initTask.Pid)
+	kernel.GlobalSessionTable.Create(sessID0, 0, "", cfg.modelName)
+
+	fmt.Printf("  mem: task[0] pid=0 token_budget=500000 caps=all\n")
+	fmt.Printf("  tty: cooked mode, session %s\n", sessID0)
+	fmt.Printf("  model: %s effort=%s\n", cfg.modelName, cfg.effort)
+	fmt.Printf("  cwd: %s\n", cfg.workDir)
+	fmt.Println("boot complete. type /help for commands.")
 	fmt.Println()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -281,6 +278,9 @@ func main() {
 				fmt.Println("  Usage: /artifact ls | /artifact cat <name>")
 			}
 
+		case input == "/exectest":
+			runExecTest()
+
 		default:
 			fmt.Println()
 			runPrompt(context.Background(), mainLLM, mainRunner, mainSessID, input, "")
@@ -478,4 +478,129 @@ func artifactTypeName(t int) string {
 	default:
 		return "?"
 	}
+}
+
+func runExecTest() {
+	fmt.Println("  === exec.go a.out oracle test ===")
+
+	imgData := makeTestMinixImage()
+	if imgData == nil {
+		fmt.Println("  FAIL: could not create MINIX image (need mkfs.minix)")
+		return
+	}
+
+	if !init011.BootWithImage(imgData) {
+		fmt.Println("  FAIL: BootWithImage failed")
+		return
+	}
+	fmt.Println("  boot ok, root mounted")
+
+	binary := fs.MakeAoutBinary(4096, 2048, 1024, 0)
+	fd := fs.SysCreat("/test.bin", 0755)
+	if fd < 0 {
+		fmt.Printf("  FAIL: creat returned %d\n", fd)
+		return
+	}
+	n := fs.SysWrite(uint32(fd), binary, len(binary))
+	fs.SysCloseFS(fd)
+	fmt.Printf("  wrote %d bytes a.out to /test.bin\n", n)
+
+	fd = fs.SysOpen("/test.bin", 0, 0)
+	if fd < 0 {
+		fmt.Printf("  FAIL: open returned %d\n", fd)
+		return
+	}
+	hdrBuf := make([]byte, 32)
+	fs.SysRead(uint32(fd), hdrBuf, 32)
+	fs.SysCloseFS(fd)
+	hdr := fs.ReadExecHeader(hdrBuf)
+	fmt.Printf("  read back header: magic=%#x text=%d data=%d bss=%d entry=%#x\n",
+		hdr.AMagic, hdr.AText, hdr.AData, hdr.ABss, hdr.AEntry)
+
+	if ret := fs.ValidateExecHeader(&hdr, uint32(n)); ret != 0 {
+		fmt.Printf("  FAIL: ValidateExecHeader returned %d\n", ret)
+		return
+	}
+	fmt.Println("  ValidateExecHeader: PASS")
+
+	savedExe := kernel.GetCurrent().Executable
+	savedBrk := kernel.GetCurrent().Brk
+	savedEndCode := kernel.GetCurrent().EndCode
+	savedEndData := kernel.GetCurrent().EndData
+
+	ret := fs.DoExecve("/test.bin", []string{"/test.bin"}, []string{})
+	if ret != 0 {
+		fmt.Printf("  FAIL: DoExecve returned %d\n", ret)
+		return
+	}
+
+	cur := kernel.GetCurrent()
+	pass := true
+	if cur.EndCode != 4096 {
+		fmt.Printf("  FAIL: EndCode=%d want 4096\n", cur.EndCode)
+		pass = false
+	}
+	if cur.EndData != 4096+2048 {
+		fmt.Printf("  FAIL: EndData=%d want %d\n", cur.EndData, 4096+2048)
+		pass = false
+	}
+	if cur.Brk != 4096+2048+1024 {
+		fmt.Printf("  FAIL: Brk=%d want %d\n", cur.Brk, 4096+2048+1024)
+		pass = false
+	}
+	if cur.Executable == nil {
+		fmt.Println("  FAIL: Executable is nil")
+		pass = false
+	}
+
+	if pass {
+		fmt.Println("  DoExecve: PASS (EndCode, EndData, Brk, Executable all correct)")
+	}
+
+	shebang := []byte("#!/test.bin\n")
+	fd = fs.SysCreat("/script.sh", 0755)
+	if fd < 0 {
+		fmt.Printf("  FAIL: creat script returned %d\n", fd)
+		return
+	}
+	fs.SysWrite(uint32(fd), shebang, len(shebang))
+	fs.SysCloseFS(fd)
+
+	cur.Executable = savedExe
+	cur.Brk = savedBrk
+	cur.EndCode = savedEndCode
+	cur.EndData = savedEndData
+
+	ret = fs.DoExecve("/script.sh", []string{"/script.sh"}, []string{})
+	if ret != 0 {
+		fmt.Printf("  shebang exec returned %d (expected: follows #! to /test.bin)\n", ret)
+	} else {
+		if cur.EndCode == 4096 {
+			fmt.Println("  shebang: PASS (followed #! → /test.bin)")
+		} else {
+			fmt.Printf("  shebang: FAIL EndCode=%d\n", cur.EndCode)
+		}
+	}
+
+	fmt.Println("  === exec test done ===")
+	fmt.Println()
+}
+
+func makeTestMinixImage() []byte {
+	tmp := "/tmp/einsteinOS_exec_test.img"
+	cmd := exec2.Command("dd", "if=/dev/zero", "of="+tmp, "bs=1024", "count=1440")
+	if err := cmd.Run(); err != nil {
+		return nil
+	}
+	cmd = exec2.Command("mkfs.minix", "-1", "-n", "14", tmp)
+	if err := cmd.Run(); err != nil {
+		os.Remove(tmp)
+		return nil
+	}
+	data, err := os.ReadFile(tmp)
+	os.Remove(tmp)
+	if err != nil {
+		return nil
+	}
+	return data
 }
