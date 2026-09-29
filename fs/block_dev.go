@@ -11,7 +11,8 @@ func BlockWrite(dev int, pos *int64, buf []byte, count int) int {
 	block := int(*pos >> BLOCK_SIZE_BITS)
 	offset := int(*pos) & (BLOCK_SIZE - 1)
 	written := 0
-	bufIdx := 0
+	bufOff := 0
+
 	for count > 0 {
 		chars := BLOCK_SIZE - offset
 		if chars > count { chars = count }
@@ -32,10 +33,10 @@ func BlockWrite(dev int, pos *int64, buf []byte, count int) int {
 		written += chars
 		count -= chars
 		for i := 0; i < chars; i++ {
-			if p+i < len(bh.BData) && bufIdx < len(buf) {
-				bh.BData[p+i] = buf[bufIdx]
+			if p < len(bh.BData) && bufOff < len(buf) {
+				bh.BData[p] = buf[bufOff]
 			}
-			bufIdx++
+			p++; bufOff++
 		}
 		bh.BDirt = 1
 		Brelse(bh)
@@ -47,29 +48,30 @@ func BlockWrite(dev int, pos *int64, buf []byte, count int) int {
 func BlockRead(dev int, pos *int64, buf []byte, count int) int {
 	block := int(*pos >> BLOCK_SIZE_BITS)
 	offset := int(*pos) & (BLOCK_SIZE - 1)
-	readBytes := 0
-	bufIdx := 0
+	readn := 0
+	bufOff := 0
+
 	for count > 0 {
 		chars := BLOCK_SIZE - offset
 		if chars > count { chars = count }
 		bh := Breada(dev, block, block+1, block+2, -1)
 		if bh == nil {
-			if readBytes != 0 { return readBytes }
+			if readn != 0 { return readn }
 			return -EIO
 		}
 		block++
 		p := offset
 		offset = 0
 		*pos += int64(chars)
-		readBytes += chars
+		readn += chars
 		count -= chars
 		for i := 0; i < chars; i++ {
-			if bufIdx < len(buf) && p+i < len(bh.BData) {
-				buf[bufIdx] = bh.BData[p+i]
+			if bufOff < len(buf) && p < len(bh.BData) {
+				buf[bufOff] = bh.BData[p]
 			}
-			bufIdx++
+			p++; bufOff++
 		}
 		Brelse(bh)
 	}
-	return readBytes
+	return readn
 }
