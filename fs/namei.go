@@ -254,12 +254,12 @@ func OpenNamei(pathname string, flag, mode int, resInode **MInode) int {
 		inode.IUid = Current.Euid
 		inode.IMode = uint16(mode)
 		inode.IDirt = 1
-		bh2, de2, _ := addEntry(dir, basename, namelen)
+		bh2, de2, deOff2 := addEntry(dir, basename, namelen)
 		if bh2 == nil {
 			inode.INlinks--; Iput(inode); Iput(dir); return -ENOSPC
 		}
 		de2.Inode = inode.INum
-		writeDirEntry(bh2.BData, 0, de2)
+		writeDirEntry(bh2.BData, deOff2, de2)
 		bh2.BDirt = 1; Brelse(bh2); Iput(dir)
 		*resInode = inode; return 0
 	}
@@ -295,10 +295,10 @@ func SysMknod(filename string, mode, dev int) int {
 	}
 	ct := uint32(CURRENT_TIME())
 	inode.IMtime = ct; inode.IAtime = ct; inode.IDirt = 1
-	bh, de, _ := addEntry(dir, basename, namelen)
+	bh, de, deOff := addEntry(dir, basename, namelen)
 	if bh == nil { Iput(dir); inode.INlinks = 0; Iput(inode); return -ENOSPC }
 	de.Inode = inode.INum
-	writeDirEntry(bh.BData, 0, de)
+	writeDirEntry(bh.BData, deOff, de)
 	bh.BDirt = 1; Iput(dir); Iput(inode); Brelse(bh)
 	return 0
 }
@@ -332,13 +332,13 @@ func SysMkdir(pathname string, mode int) int {
 	inode.INlinks = 2; dirBlock.BDirt = 1; Brelse(dirBlock)
 	inode.IMode = uint16(I_DIRECTORY | (mode & 0777 & ^int(Current.Umask)))
 	inode.IDirt = 1
-	bh, de, _ := addEntry(dir, basename, namelen)
+	bh, de, deOff := addEntry(dir, basename, namelen)
 	if bh == nil {
 		Iput(dir); FreeBlock(int(inode.IDev), int(inode.IZone[0]))
 		inode.INlinks = 0; Iput(inode); return -ENOSPC
 	}
 	de.Inode = inode.INum
-	writeDirEntry(bh.BData, 0, de)
+	writeDirEntry(bh.BData, deOff, de)
 	bh.BDirt = 1; dir.INlinks++; dir.IDirt = 1
 	Iput(dir); Iput(inode); Brelse(bh)
 	return 0
@@ -443,10 +443,10 @@ func SysLink(oldname, newname string) int {
 	if !permission(dir, MAY_WRITE) { Iput(dir); Iput(oldinode); return -EACCES }
 	bh, _, _ := findEntry(&dir, basename, namelen)
 	if bh != nil { Brelse(bh); Iput(dir); Iput(oldinode); return -EEXIST }
-	bh, de, _ := addEntry(dir, basename, namelen)
+	bh, de, deOff := addEntry(dir, basename, namelen)
 	if bh == nil { Iput(dir); Iput(oldinode); return -ENOSPC }
 	de.Inode = oldinode.INum
-	writeDirEntry(bh.BData, 0, de)
+	writeDirEntry(bh.BData, deOff, de)
 	bh.BDirt = 1; Brelse(bh); Iput(dir)
 	oldinode.INlinks++
 	oldinode.ICtime = uint32(CURRENT_TIME())

@@ -103,6 +103,12 @@ type TaskStruct struct {
 	Tss TssStruct
 
 	Mu   sync.Mutex
+
+	TokenBudget  int64
+	TokenUsed    int64
+	ContextSize  int64
+	ContextLimit int64
+	Effort       uint8
 }
 
 var (

@@ -13,6 +13,8 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/chr_drv"
+	"google.golang.org/adk/v2/fs"
 	"google.golang.org/adk/v2/kernel"
 	"google.golang.org/adk/v2/model/claudeweb"
 	"google.golang.org/adk/v2/runner"
@@ -54,6 +56,16 @@ func main() {
 	fmt.Println("  /kill <pid>       kill(pid, SIGKILL)")
 	fmt.Println("  /ps               show_stat()")
 	fmt.Println("  /new              reset main conversation")
+	fmt.Println("  /top              token budget overview")
+	fmt.Println("  /budget <pid> <n> set token budget")
+	fmt.Println("  /effort <pid> l|m|h set effort level")
+	fmt.Println("  /pipe <from> <to> create agent pipe")
+	fmt.Println("  /exec <pid> <prompt> swap agent system prompt")
+	fmt.Println("  /tty <pid> raw|cooked set I/O mode")
+	fmt.Println("  /cache              prompt cache stats")
+	fmt.Println("  /ctx <pid>          context COW stats")
+	fmt.Println("  /artifact ls        list artifacts")
+	fmt.Println("  /artifact cat <n>   read artifact")
 	fmt.Println("  /quit             exit")
 	fmt.Println("═══════════════════════════════════════════════")
 	fmt.Println()
@@ -146,6 +158,124 @@ func main() {
 			}
 			fmt.Println()
 
+		case input == "/top":
+			fmt.Print(kernel.TokenPs())
+			fmt.Println()
+
+		case strings.HasPrefix(input, "/budget "):
+			parts := strings.Fields(input)
+			if len(parts) != 3 {
+				fmt.Println("  Usage: /budget <pid> <tokens>")
+				continue
+			}
+			pid, _ := strconv.ParseInt(parts[1], 10, 64)
+			budget, _ := strconv.ParseInt(parts[2], 10, 64)
+			kernel.SetTokenBudget(pid, budget)
+			fmt.Printf("  pid %d budget = %d tokens\n\n", pid, budget)
+
+		case strings.HasPrefix(input, "/effort "):
+			parts := strings.Fields(input)
+			if len(parts) != 3 {
+				fmt.Println("  Usage: /effort <pid> l|m|h")
+				continue
+			}
+			pid, _ := strconv.ParseInt(parts[1], 10, 64)
+			var eff uint8 = kernel.EFFORT_MEDIUM
+			switch parts[2] {
+			case "l", "low":
+				eff = kernel.EFFORT_LOW
+			case "h", "high":
+				eff = kernel.EFFORT_HIGH
+			}
+			kernel.SetEffort(pid, eff)
+			fmt.Printf("  pid %d effort = %d\n\n", pid, eff)
+
+		case strings.HasPrefix(input, "/pipe "):
+			parts := strings.Fields(input)
+			if len(parts) != 3 {
+				fmt.Println("  Usage: /pipe <from_pid> <to_pid>")
+				continue
+			}
+			pipeID := kernel.CreateAgentPipe()
+			fmt.Printf("  pipe %d created\n\n", pipeID)
+
+		case strings.HasPrefix(input, "/exec "):
+			rest := strings.TrimPrefix(input, "/exec ")
+			parts := strings.SplitN(rest, " ", 2)
+			if len(parts) != 2 {
+				fmt.Println("  Usage: /exec <pid> <new system prompt>")
+				continue
+			}
+			pid, _ := strconv.ParseInt(parts[0], 10, 64)
+			ret := kernel.AgentExec(pid, &kernel.AgentImage{
+				SystemPrompt: parts[1],
+			})
+			if ret < 0 {
+				fmt.Printf("  exec failed: %d\n\n", ret)
+			} else {
+				fmt.Printf("  pid %d: system prompt swapped\n\n", pid)
+			}
+
+		case strings.HasPrefix(input, "/tty "):
+			parts := strings.Fields(input)
+			if len(parts) != 3 {
+				fmt.Println("  Usage: /tty <pid> raw|cooked")
+				continue
+			}
+			pid, _ := strconv.ParseInt(parts[1], 10, 64)
+			mode := chr_drv.AGENT_TTY_COOKED
+			if parts[2] == "raw" {
+				mode = chr_drv.AGENT_TTY_RAW
+			}
+			chr_drv.SetAgentTtyMode(pid, mode)
+			fmt.Printf("  pid %d tty mode = %s\n\n", pid, parts[2])
+
+		case input == "/cache":
+			total, used, dirty := kernel.GlobalPromptCache.Stats()
+			fmt.Printf("  prompt cache: %d/%d tokens used, %d dirty\n\n", used, total, dirty)
+
+		case strings.HasPrefix(input, "/ctx"):
+			args := strings.TrimSpace(strings.TrimPrefix(input, "/ctx"))
+			if args == "" {
+				fmt.Println("  Usage: /ctx <pid>")
+				continue
+			}
+			pid, _ := strconv.ParseInt(args, 10, 64)
+			ctx := kernel.GetCOWContext(pid)
+			if ctx == nil {
+				fmt.Printf("  pid %d: no context\n\n", pid)
+			} else {
+				fmt.Printf("  pid %d: %d pages, %d shared, ~%d tokens\n\n",
+					pid, ctx.Len(), ctx.SharedPages(), ctx.TotalTokens())
+			}
+
+		case strings.HasPrefix(input, "/artifact "):
+			rest := strings.TrimSpace(strings.TrimPrefix(input, "/artifact "))
+			switch {
+			case rest == "ls":
+				names := fs.GlobalArtifactFS.List()
+				if len(names) == 0 {
+					fmt.Println("  (no artifacts)")
+				}
+				for name, inum := range names {
+					atype, size, nlinks, _ := fs.GlobalArtifactFS.Stat(name)
+					fmt.Printf("  %-4d %-8s %6d bytes  nlinks=%d  %s\n",
+						inum, artifactTypeName(int(atype)), size, nlinks, name)
+				}
+				fmt.Println()
+			case strings.HasPrefix(rest, "cat "):
+				name := strings.TrimPrefix(rest, "cat ")
+				inode := fs.GlobalArtifactFS.Open(name)
+				if inode == nil {
+					fmt.Printf("  artifact %q not found\n\n", name)
+				} else {
+					data := inode.Read()
+					fmt.Printf("%s\n\n", string(data))
+				}
+			default:
+				fmt.Println("  Usage: /artifact ls | /artifact cat <name>")
+			}
+
 		default:
 			fmt.Println()
 			runPrompt(context.Background(), mainLLM, mainRunner, mainSessID, input, "")
@@ -180,9 +310,20 @@ func runChildProcess(pid int64, prompt string) {
 		}
 	}
 
-	kernel.SetResult(pid, result.String())
-	kernel.Exit(pid, 0)
-	log.Printf("[PID=%d] process exited", pid)
+	resultStr := result.String()
+	tokens := int64(len(resultStr) / 4)
+	kernel.AccountTokens(pid, tokens)
+	kernel.SetResult(pid, resultStr)
+
+	artName := fmt.Sprintf("pid_%d_result", pid)
+	fs.GlobalArtifactFS.Create(artName, fs.ARTIFACT_RESULT, pid, []byte(resultStr))
+
+	kernel.AgentExit(pid, &kernel.AgentExitInfo{
+		Code:   kernel.EXIT_SUCCESS,
+		Result: resultStr,
+		Tokens: tokens,
+	})
+	log.Printf("[PID=%d] process exited, ~%d tokens", pid, tokens)
 }
 
 func runPrompt(ctx context.Context, llm *claudeweb.Model, r *runner.Runner, sessID string, prompt string, prefix string) {
@@ -265,4 +406,19 @@ func envRequired(key string) string {
 func mustGetwd() string {
 	d, _ := os.Getwd()
 	return d
+}
+
+func artifactTypeName(t int) string {
+	switch fs.ArtifactType(t) {
+	case fs.ARTIFACT_FILE:
+		return "file"
+	case fs.ARTIFACT_MEMORY:
+		return "memory"
+	case fs.ARTIFACT_RESULT:
+		return "result"
+	case fs.ARTIFACT_LOG:
+		return "log"
+	default:
+		return "?"
+	}
 }
