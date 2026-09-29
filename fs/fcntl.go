@@ -16,14 +16,11 @@ const (
 	F_GETLK  = 5
 	F_SETLK  = 6
 	F_SETLKW = 7
-	O_APPEND   = 02000
 	O_NONBLOCK = 04000
-	EMFILE = 24
-	ENODEV = 19
-	ENOTTY = 25
+	EMFILE   = 24
 )
 
-// fcntl.c lines 185-201: dupfd
+// fcntl.c lines 74-90: dupfd
 func dupfd(fd, arg uint32) int {
 	if fd >= NR_OPEN || Current.Filp[fd] == nil { return -EBADF }
 	if arg >= NR_OPEN { return -EINVAL_FS }
@@ -32,25 +29,25 @@ func dupfd(fd, arg uint32) int {
 		arg++
 	}
 	if arg >= NR_OPEN { return -EMFILE }
-	Current.CloseOnExec &^= uint32(1 << arg)
+	Current.CloseOnExec &^= 1 << arg
 	Current.Filp[arg] = Current.Filp[fd]
 	Current.Filp[arg].FCount++
 	return int(arg)
 }
 
-// fcntl.c lines 203-207: sys_dup2
+// fcntl.c lines 92-96: sys_dup2
 func SysDup2(oldfd, newfd uint32) int {
 	SysCloseFS(int(newfd))
 	return dupfd(oldfd, newfd)
 }
 
-// fcntl.c lines 209-212: sys_dup
+// fcntl.c lines 98-101: sys_dup
 func SysDup(fildes uint32) int {
 	return dupfd(fildes, 0)
 }
 
-// fcntl.c lines 214-242: sys_fcntl
-func SysFcntl(fd, cmd, arg uint32) int {
+// fcntl.c lines 103-131: sys_fcntl
+func SysFcntl(fd, cmd uint32, arg uint32) int {
 	if fd >= NR_OPEN || Current.Filp[fd] == nil { return -EBADF }
 	filp := Current.Filp[fd]
 	switch cmd {

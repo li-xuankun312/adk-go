@@ -6,11 +6,13 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// file_dev.c lines 194-223: file_read
+const O_APPEND = 02000
+
+// file_dev.c lines 17-46: file_read
 func FileRead(inode *MInode, filp *File, buf []byte, count int) int {
 	left := count
 	if left <= 0 { return 0 }
-	bufIdx := 0
+	bufOff := 0
 	for left > 0 {
 		nr := Bmap(inode, int(filp.FPos)/BLOCK_SIZE)
 		var bh *BufferHead
@@ -25,25 +27,25 @@ func FileRead(inode *MInode, filp *File, buf []byte, count int) int {
 		left -= chars
 		if bh != nil {
 			for i := 0; i < chars; i++ {
-				if bufIdx < len(buf) && off+i < len(bh.BData) {
-					buf[bufIdx] = bh.BData[off+i]
+				if bufOff < len(buf) && off < len(bh.BData) {
+					buf[bufOff] = bh.BData[off]
 				}
-				bufIdx++
+				off++; bufOff++
 			}
 			Brelse(bh)
 		} else {
 			for i := 0; i < chars; i++ {
-				if bufIdx < len(buf) { buf[bufIdx] = 0 }
-				bufIdx++
+				if bufOff < len(buf) { buf[bufOff] = 0 }
+				bufOff++
 			}
 		}
 	}
 	inode.IAtime = uint32(CURRENT_TIME())
-	if count-left > 0 { return count - left }
+	if count-left != 0 { return count - left }
 	return -1
 }
 
-// file_dev.c lines 225-267: file_write
+// file_dev.c lines 48-89: file_write
 func FileWrite(inode *MInode, filp *File, buf []byte, count int) int {
 	var pos int64
 	if filp.FFlags&uint16(O_APPEND) != 0 {
@@ -52,7 +54,7 @@ func FileWrite(inode *MInode, filp *File, buf []byte, count int) int {
 		pos = filp.FPos
 	}
 	i := 0
-	bufIdx := 0
+	bufOff := 0
 	for i < count {
 		block := CreateBlock(inode, int(pos)/BLOCK_SIZE)
 		if block == 0 { break }
@@ -70,18 +72,17 @@ func FileWrite(inode *MInode, filp *File, buf []byte, count int) int {
 		}
 		i += c
 		for j := 0; j < c; j++ {
-			if p+j < len(bh.BData) && bufIdx < len(buf) {
-				bh.BData[p+j] = buf[bufIdx]
+			if p < len(bh.BData) && bufOff < len(buf) {
+				bh.BData[p] = buf[bufOff]
 			}
-			bufIdx++
+			p++; bufOff++
 		}
 		Brelse(bh)
 	}
-	ct := uint32(CURRENT_TIME())
-	inode.IMtime = ct
+	inode.IMtime = uint32(CURRENT_TIME())
 	if filp.FFlags&uint16(O_APPEND) == 0 {
 		filp.FPos = pos
-		inode.ICtime = ct
+		inode.ICtime = uint32(CURRENT_TIME())
 	}
 	if i != 0 { return i }
 	return -1

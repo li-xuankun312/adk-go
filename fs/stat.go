@@ -6,7 +6,7 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// Stat structure for sys_stat/sys_fstat
+// Stat structure — matches Linux 0.11 struct stat
 type Stat struct {
 	StDev   uint16
 	StIno   uint16
@@ -21,7 +21,7 @@ type Stat struct {
 	StCtime uint32
 }
 
-// stat.c lines 126-145: cp_stat
+// stat.c lines 15-34: cp_stat
 func cpStat(inode *MInode) Stat {
 	return Stat{
 		StDev:   inode.IDev,
@@ -38,7 +38,7 @@ func cpStat(inode *MInode) Stat {
 	}
 }
 
-// stat.c lines 147-156: sys_stat
+// stat.c lines 36-45: sys_stat
 func SysStat(filename string) (Stat, int) {
 	var inode *MInode
 	if nameiFn != nil { inode = nameiFn(filename) }
@@ -48,7 +48,7 @@ func SysStat(filename string) (Stat, int) {
 	return st, 0
 }
 
-// stat.c lines 158-167: sys_fstat
+// stat.c lines 47-56: sys_fstat
 func SysFstat(fd uint32) (Stat, int) {
 	if fd >= NR_OPEN || Current.Filp[fd] == nil { return Stat{}, -EBADF }
 	f := Current.Filp[fd]
