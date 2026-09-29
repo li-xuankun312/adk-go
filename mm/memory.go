@@ -435,7 +435,13 @@ func MemInit(startMem, endMem uint32) {
 		i++
 	}
 
-	log.Printf("mm: mem_init done, %d pages free", remain)
+	free := 0
+	for j := 0; j < PAGING_PAGES; j++ {
+		if memMap[j] == 0 {
+			free++
+		}
+	}
+	log.Printf("mm: mem_init done, %d pages free", free)
 }
 
 func CalcMem() {

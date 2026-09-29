@@ -219,13 +219,19 @@ func DoHdRequest() {
 		return
 	}
 	sector := blockNr + startSect*2
-	_ = sector
 	nsect := int(req.NrSectors)
+	// CHS decomposition from absolute sector
+	secPerTrack := int(HdInfo[drive].Sect)
+	heads := int(HdInfo[drive].Head)
+	sect := sector%secPerTrack + 1
+	track := sector / secPerTrack
+	head := track % heads
+	cyl := track / heads
 	if req.Cmd == READ {
-		hdOut(drive, nsect, 0, 0, 0, WIN_READ)
+		hdOut(drive, nsect, sect, head, cyl, WIN_READ)
 		readIntr(drive)
 	} else if req.Cmd == WRITE {
-		hdOut(drive, nsect, 0, 0, 0, WIN_WRITE)
+		hdOut(drive, nsect, sect, head, cyl, WIN_WRITE)
 		writeIntr(drive)
 	} else {
 		log.Printf("hd: unknown command %d", req.Cmd)

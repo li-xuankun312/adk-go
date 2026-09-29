@@ -209,18 +209,26 @@ func MountRoot() {
 	Current.Root = mi
 	free := 0
 	for i := int(p.SNzones) - 1; i >= 0; i-- {
-		if p.SZmap[i>>13] != nil && !setBit(i&8191, p.SZmap[i>>13].BData) {
+		if p.SZmap[i>>13] != nil && !testBit(i&8191, p.SZmap[i>>13].BData) {
 			free++
 		}
 	}
 	log.Printf("fs: %d/%d free blocks", free, p.SNzones)
 	free = 0
 	for i := int(p.SNinodes); i >= 0; i-- {
-		if p.SImap[i>>13] != nil && !setBit(i&8191, p.SImap[i>>13].BData) {
+		if p.SImap[i>>13] != nil && !testBit(i&8191, p.SImap[i>>13].BData) {
 			free++
 		}
 	}
 	log.Printf("fs: %d/%d free inodes", free, p.SNinodes)
+}
+
+func testBit(nr int, addr []byte) bool {
+	if addr == nil { return true }
+	byteIdx := nr >> 3
+	bitIdx := uint(nr & 7)
+	if byteIdx >= len(addr) { return true }
+	return (addr[byteIdx]>>bitIdx)&1 != 0
 }
 
 func setBit(nr int, addr []byte) bool {

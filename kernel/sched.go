@@ -328,9 +328,9 @@ func SchedInit() {
 	initTask.Root = nil
 	initTask.Executable = nil
 	initTask.CloseOnExec = 0
-	initTask.Ldt[0] = DescStruct{0, 0}
-	initTask.Ldt[1] = DescStruct{0x9f, 0xc0fa00}
-	initTask.Ldt[2] = DescStruct{0x9f, 0xc0f200}
+	initTask.Ldt[0] = DescStruct{A: 0, B: 0}
+	initTask.Ldt[1] = DescStruct{A: 0x9f, B: 0xc0fa00}
+	initTask.Ldt[2] = DescStruct{A: 0x9f, B: 0xc0f200}
 	initTask.Tss.Esp0 = PAGE_SIZE
 	initTask.Tss.Ss0 = 0x10
 	initTask.Tss.Cr3 = 0

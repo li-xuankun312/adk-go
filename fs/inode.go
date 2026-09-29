@@ -69,10 +69,6 @@ func InvalidateInodes(dev int) {
 }
 
 func SyncInodes() {
-	if syncInodesFn != nil {
-		syncInodesFn()
-		return
-	}
 	for i := 0; i < NR_INODE; i++ {
 		inode := &InodeTable[i]
 		waitOnInode(inode)

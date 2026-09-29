@@ -12,6 +12,7 @@ import (
 	"google.golang.org/adk/v2/mm"
 )
 
+
 var (
 	memoryEnd        int32 = 16 * 1024 * 1024
 	bufferMemoryEnd  int32 = 4 * 1024 * 1024
@@ -49,7 +50,7 @@ func KernelMain() {
 	fs.BufferInit(bufferMemoryEnd)
 	blk_drv.HdInit()
 
-	wireCallbacks()
+	WireAll()
 
 	log.Println("linux-0.11-go: Initialization complete.")
 
@@ -62,31 +63,7 @@ func KernelMain() {
 	}
 }
 
-func wireCallbacks() {
-	kernel.SetWriteVerify(mm.WriteVerify)
 
-	fs.SetSleepOn(kernel.SleepOn)
-	fs.SetWakeUp(kernel.WakeUp)
-
-	blk_drv.SetSleepOn(kernel.SleepOn)
-	blk_drv.SetWakeUp(kernel.WakeUp)
-
-	fs.SetLlRwBlock(blk_drv.LlRwBlock)
-
-	blk_drv.SetBread(fs.Bread)
-	blk_drv.SetBrelse(fs.Brelse)
-
-	fs.SetFreePage(mm.FreePage)
-
-	chr_drv.SetInterruptibleSleepOn(kernel.InterruptibleSleepOn)
-	chr_drv.SetWakeUp(kernel.WakeUp)
-	chr_drv.SetSchedule(kernel.Schedule)
-
-	fs.SetTtyRead(chr_drv.TtyRead)
-	fs.SetTtyWrite(chr_drv.TtyWrite)
-
-	fs.SetTtyIoctl(chr_drv.TtyIoctl)
-}
 
 func initProcess() {
 	log.Println("linux-0.11-go: init process started")

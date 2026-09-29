@@ -10,10 +10,6 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-const (
-	SIG_KILL int64 = 9
-)
-
 type TaskMeta struct {
 	Prompt string
 	Pwd    string
@@ -31,17 +27,7 @@ type TaskMeta struct {
 var (
 	taskMeta = make(map[int64]*TaskMeta)
 	metaMu   sync.Mutex
-	nextPid  int64 = 1
-	pidMu    sync.Mutex
 )
-
-func allocPid() int64 {
-	pidMu.Lock()
-	defer pidMu.Unlock()
-	p := nextPid
-	nextPid++
-	return p
-}
 
 func getMeta(pid int64) *TaskMeta {
 	metaMu.Lock()
@@ -62,45 +48,43 @@ func Init() {
 	Current = Task[0]
 	Current.State = TASK_RUNNING
 	Current.Pid = 0
-	Current.Father = 0
-	Current.Tty = 0
+	Current.Father = -1
+	Current.Pgrp = 0
+	Current.Session = 0
+	Current.Leader = 1
+	Current.Tty = -1
+	Current.Umask = 0022
+	Current.Counter = 15
+	Current.Priority = 15
 	taskMeta[0] = &TaskMeta{Pwd: "."}
 }
 
 func Fork(prompt string, pwd string) (int64, error) {
-	pid := allocPid()
-
-	schedMu.Lock()
-	slot := -1
-	for i := 1; i < NR_TASKS; i++ {
-		if Task[i] == nil {
-			slot = i
-			break
-		}
-	}
-	if slot < 0 {
-		schedMu.Unlock()
+	nr := FindEmptyProcess()
+	if nr < 0 {
 		return 0, fmt.Errorf("fork: no free task slots")
 	}
 
-	child := &TaskStruct{}
-	*child = *Current
-	child.Pid = int32(pid)
-	child.Father = Current.Pid
-	child.State = TASK_RUNNING
-	child.Counter = int32(Current.Counter >> 1)
-	Current.Counter >>= 1
-	child.Signal = 0
-	child.Alarm = 0
-	child.Leader = 0
-	child.UsedMath = 0
+	pid := CopyProcess(nr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	if pid < 0 {
+		return 0, fmt.Errorf("fork: copy_process failed (%d)", pid)
+	}
 
-	Task[slot] = child
-	schedMu.Unlock()
+	SetTokenBudget(int64(pid), DEFAULT_TOKEN_BUDGET)
+	SetContextLimit(int64(pid), DEFAULT_CONTEXT_LIMIT)
+	SetEffort(int64(pid), EFFORT_MEDIUM)
+
+	parentCtx := GetCOWContext(int64(Current.Pid))
+	if parentCtx != nil {
+		parentCtx.ForkTo(int64(pid))
+	} else {
+		cowCtx := NewCOWContext(int64(pid))
+		cowCtx.Append(prompt)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	metaMu.Lock()
-	taskMeta[pid] = &TaskMeta{
+	taskMeta[int64(pid)] = &TaskMeta{
 		Prompt: prompt,
 		Pwd:    pwd,
 		Ctx:    ctx,
@@ -109,35 +93,19 @@ func Fork(prompt string, pwd string) (int64, error) {
 	}
 	metaMu.Unlock()
 
-	return pid, nil
+	return int64(pid), nil
 }
 
 func ForkExec(command string, workDir string) (int64, error) {
-	pid := allocPid()
-
-	schedMu.Lock()
-	slot := -1
-	for i := 1; i < NR_TASKS; i++ {
-		if Task[i] == nil {
-			slot = i
-			break
-		}
-	}
-	if slot < 0 {
-		schedMu.Unlock()
+	nr := FindEmptyProcess()
+	if nr < 0 {
 		return 0, fmt.Errorf("fork: %d tasks full", NR_TASKS)
 	}
 
-	child := &TaskStruct{}
-	child.Pid = int32(pid)
-	child.Father = Current.Pid
-	child.State = TASK_RUNNING
-	child.Counter = 15
-	child.Priority = 15
-	child.Signal = 0
-
-	Task[slot] = child
-	schedMu.Unlock()
+	pid := CopyProcess(nr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	if pid < 0 {
+		return 0, fmt.Errorf("fork: copy_process failed (%d)", pid)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
@@ -157,13 +125,13 @@ func ForkExec(command string, workDir string) (int64, error) {
 	cmd.Stderr = &meta.stderr
 
 	metaMu.Lock()
-	taskMeta[pid] = meta
+	taskMeta[int64(pid)] = meta
 	metaMu.Unlock()
 
 	err := cmd.Start()
 	if err != nil {
 		schedMu.Lock()
-		Task[slot] = nil
+		Task[nr] = nil
 		schedMu.Unlock()
 		cancel()
 		return 0, fmt.Errorf("exec: %v", err)
@@ -171,10 +139,10 @@ func ForkExec(command string, workDir string) (int64, error) {
 
 	go func() {
 		werr := cmd.Wait()
-		exitCode := 0
+		exitCode := int32(0)
 		if werr != nil {
 			if exitErr, ok := werr.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
+				exitCode = int32(exitErr.ExitCode())
 			} else {
 				exitCode = 1
 			}
@@ -187,9 +155,10 @@ func ForkExec(command string, workDir string) (int64, error) {
 
 		schedMu.Lock()
 		for i := 1; i < NR_TASKS; i++ {
-			if Task[i] != nil && int64(Task[i].Pid) == pid {
+			if Task[i] != nil && int64(Task[i].Pid) == int64(pid) {
 				Task[i].State = TASK_ZOMBIE
-				Task[i].ExitCode = int32(exitCode)
+				Task[i].ExitCode = exitCode
+				TellFather(Task[i].Father)
 				break
 			}
 		}
@@ -198,16 +167,21 @@ func ForkExec(command string, workDir string) (int64, error) {
 		close(meta.Done)
 	}()
 
-	return pid, nil
+	return int64(pid), nil
 }
 
 func Exit(pid int64, code int) {
+	if cowCtx := GetCOWContext(pid); cowCtx != nil {
+		cowCtx.Release()
+	}
+
 	schedMu.Lock()
-	defer schedMu.Unlock()
+	saved := Current
 	for i := 1; i < NR_TASKS; i++ {
 		if Task[i] != nil && int64(Task[i].Pid) == pid {
-			Task[i].State = TASK_ZOMBIE
-			Task[i].ExitCode = int32(code)
+			Current = Task[i]
+			schedMu.Unlock()
+
 			metaMu.Lock()
 			if m, ok := taskMeta[pid]; ok && m.Done != nil {
 				select {
@@ -217,77 +191,46 @@ func Exit(pid int64, code int) {
 				}
 			}
 			metaMu.Unlock()
+
+			DoExit(int32(code) << 8)
+
+			schedMu.Lock()
+			Current = saved
+			schedMu.Unlock()
 			return
 		}
 	}
+	schedMu.Unlock()
 }
 
 func Wait(pid int64) (int64, int, error) {
-	schedMu.Lock()
-	var targetSlot int = -1
-	var targetPid int64 = -1
-	for i := 1; i < NR_TASKS; i++ {
-		t := Task[i]
-		if t == nil {
-			continue
+	if pid >= 0 {
+		metaMu.Lock()
+		meta := taskMeta[pid]
+		metaMu.Unlock()
+		if meta != nil && meta.Done != nil {
+			<-meta.Done
 		}
-		if pid >= 0 && int64(t.Pid) != pid {
-			continue
-		}
-		targetSlot = i
-		targetPid = int64(t.Pid)
-		if t.State == TASK_ZOMBIE {
-			code := int(t.ExitCode)
-			Task[i] = nil
-			schedMu.Unlock()
-			return targetPid, code, nil
-		}
-		break
 	}
+
+	schedMu.Lock()
+	wpid := int32(-1)
+	if pid >= 0 {
+		wpid = int32(pid)
+	}
+	var stat int32
+	ret := SysWaitpid(wpid, &stat, 0)
 	schedMu.Unlock()
 
-	if targetPid < 0 {
-		return 0, 0, fmt.Errorf("wait: no children")
+	if ret < 0 {
+		return 0, 0, fmt.Errorf("wait: %s", errName(int(ret)))
 	}
-
-	metaMu.Lock()
-	meta := taskMeta[targetPid]
-	metaMu.Unlock()
-
-	if meta != nil && meta.Done != nil {
-		<-meta.Done
-	}
-
-	schedMu.Lock()
-	defer schedMu.Unlock()
-	if targetSlot >= 0 && targetSlot < NR_TASKS && Task[targetSlot] != nil && int64(Task[targetSlot].Pid) == targetPid {
-		code := int(Task[targetSlot].ExitCode)
-		Task[targetSlot] = nil
-		return targetPid, code, nil
-	}
-	for i := 1; i < NR_TASKS; i++ {
-		if Task[i] != nil && int64(Task[i].Pid) == targetPid {
-			code := int(Task[i].ExitCode)
-			Task[i] = nil
-			return targetPid, code, nil
-		}
-	}
-	return 0, 0, fmt.Errorf("wait: child %d disappeared", targetPid)
+	return int64(ret), int(stat >> 8), nil
 }
 
 func Kill(pid int64, sig int64) error {
-	schedMu.Lock()
-	found := false
-	for i := 0; i < NR_TASKS; i++ {
-		if Task[i] != nil && int64(Task[i].Pid) == pid {
-			Task[i].Signal |= int32(1 << uint(sig-1))
-			found = true
-			break
-		}
-	}
-	schedMu.Unlock()
-
-	if !found {
+	ret := SysKill(int32(pid), int32(sig))
+	if ret != 0 {
 		return fmt.Errorf("kill: no such process %d", pid)
 	}
 
@@ -304,7 +247,6 @@ func Kill(pid int64, sig int64) error {
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -419,4 +361,17 @@ func GetStderr(pid int64) string {
 
 func SetStartupTime(t int64) {
 	StartupTime = int32(t)
+}
+
+const SIG_KILL int64 = 9
+
+func errName(code int) string {
+	switch code {
+	case -ECHILD:
+		return "ECHILD"
+	case -EINTR:
+		return "EINTR"
+	default:
+		return fmt.Sprintf("errno %d", -code)
+	}
 }

@@ -76,7 +76,7 @@ func CopyProcess(nr int, ebp, edi, esi, gs int32,
 
 	Task[nr] = p
 
-	*p = *Current
+	copyTaskStruct(p, Current)
 
 	p.State = TASK_UNINTERRUPTIBLE
 	p.Pid = lastPid
@@ -160,4 +160,51 @@ repeat:
 		}
 	}
 	return -EAGAIN
+}
+
+func copyTaskStruct(dst, src *TaskStruct) {
+	dst.State = src.State
+	dst.Counter = src.Counter
+	dst.Priority = src.Priority
+	dst.Signal = src.Signal
+	dst.Sigaction = src.Sigaction
+	dst.Blocked = src.Blocked
+	dst.ExitCode = src.ExitCode
+	dst.StartCode = src.StartCode
+	dst.EndCode = src.EndCode
+	dst.EndData = src.EndData
+	dst.Brk = src.Brk
+	dst.StartStack = src.StartStack
+	dst.Pid = src.Pid
+	dst.Father = src.Father
+	dst.Pgrp = src.Pgrp
+	dst.Session = src.Session
+	dst.Leader = src.Leader
+	dst.Uid = src.Uid
+	dst.Euid = src.Euid
+	dst.Suid = src.Suid
+	dst.Gid = src.Gid
+	dst.Egid = src.Egid
+	dst.Sgid = src.Sgid
+	dst.Alarm = src.Alarm
+	dst.Utime = src.Utime
+	dst.Stime = src.Stime
+	dst.Cutime = src.Cutime
+	dst.Cstime = src.Cstime
+	dst.StartTime = src.StartTime
+	dst.UsedMath = src.UsedMath
+	dst.Tty = src.Tty
+	dst.Umask = src.Umask
+	dst.Pwd = src.Pwd
+	dst.Root = src.Root
+	dst.Executable = src.Executable
+	dst.CloseOnExec = src.CloseOnExec
+	dst.Filp = src.Filp
+	dst.Ldt = src.Ldt
+	dst.Tss = src.Tss
+	dst.TokenBudget = src.TokenBudget
+	dst.TokenUsed = 0
+	dst.ContextSize = 0
+	dst.ContextLimit = src.ContextLimit
+	dst.Effort = src.Effort
 }
