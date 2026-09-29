@@ -18,7 +18,7 @@ type Model struct {
 	client    *Client
 	modelName string
 	effort    string
-	Shadow    *ShadowExecutor // if set, mirrors remote tool calls locally
+	Shadow    *ShadowExecutor
 
 	mu             sync.Mutex
 	convID         string
@@ -38,7 +38,6 @@ func NewModel(client *Client, modelName string, effort string) *Model {
 
 func (m *Model) Name() string { return m.modelName }
 
-// ResetConversation clears conversation state so next message starts fresh.
 func (m *Model) ResetConversation() {
 	m.mu.Lock()
 	m.convID = ""
@@ -46,7 +45,6 @@ func (m *Model) ResetConversation() {
 	m.mu.Unlock()
 }
 
-// ConvID returns the current conversation UUID (for status display).
 func (m *Model) ConvID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -56,8 +54,8 @@ func (m *Model) ConvID() string {
 	return m.convID[:8]
 }
 
-// toolBlock tracks a tool_use content block being streamed
 type toolBlock struct {
+	id        string
 	name      string
 	inputJSON strings.Builder
 }
@@ -113,6 +111,12 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	log.Printf("claudeweb: → %s prompt=%q", convID[:8], truncate(prompt, 60))
 
 	return func(yield func(*model.LLMResponse, error) bool) {
+		m.completionLoop(ctx, convID, webReq, stream, yield)
+	}
+}
+
+func (m *Model) completionLoop(ctx context.Context, convID string, webReq *CompletionRequest, stream bool, yield func(*model.LLMResponse, error) bool) {
+	for round := 0; round < 20; round++ {
 		body, err := m.client.Completion(convID, webReq)
 		if err != nil {
 			m.mu.Lock()
@@ -129,32 +133,30 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			}, nil)
 			return
 		}
-		defer body.Close()
 
 		events := ParseSSEStream(body)
 		var textBuf strings.Builder
-		var shadowResults []string
-
-		// Track tool_use blocks by index
 		toolBlocks := map[int]*toolBlock{}
+		var collectedTools []toolBlock
+		var parentMsgUUID string
 
 		for event := range events {
 			select {
 			case <-ctx.Done():
+				body.Close()
 				yield(nil, ctx.Err())
 				return
 			default:
 			}
 
 			switch event.Event {
-			case "ping", "conversation_ready", "message_limit", "message_delta":
+			case "ping", "conversation_ready", "message_limit":
 				continue
 
 			case "message_start":
 				var ev MessageStartEvent
 				if err := json.Unmarshal(event.Data, &ev); err == nil {
-					m.mu.Lock()
-					m.mu.Unlock()
+					parentMsgUUID = ev.Message.UUID
 				}
 
 			case "content_block_start":
@@ -164,9 +166,10 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				}
 				if ev.ContentBlock.Type == "tool_use" {
 					toolBlocks[ev.Index] = &toolBlock{
+						id:   ev.ContentBlock.ID,
 						name: ev.ContentBlock.Name,
 					}
-					log.Printf("[remote] tool_use start: %s", ev.ContentBlock.Name)
+					log.Printf("[remote] tool_use start: %s (id=%s)", ev.ContentBlock.Name, ev.ContentBlock.ID)
 				}
 
 			case "content_block_delta":
@@ -174,7 +177,6 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				if err := json.Unmarshal(event.Data, &ev); err != nil {
 					continue
 				}
-
 				switch ev.Delta.Type {
 				case "text_delta":
 					textBuf.WriteString(ev.Delta.Text)
@@ -186,6 +188,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 							},
 							Partial: true,
 						}, nil) {
+							body.Close()
 							return
 						}
 					}
@@ -200,40 +203,20 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				if err := json.Unmarshal(event.Data, &ev); err != nil {
 					continue
 				}
-				// Tool block finished → shadow execute!
 				if tb, ok := toolBlocks[ev.Index]; ok {
-					if m.Shadow != nil {
-						result := m.Shadow.Execute(tb.name, tb.inputJSON.String())
-						if result != "" {
-							shadowResults = append(shadowResults, result)
-						}
-					}
+					collectedTools = append(collectedTools, *tb)
 					delete(toolBlocks, ev.Index)
 				}
 
+			case "message_delta":
+				continue
+
 			case "message_stop":
-				text := textBuf.String()
-				// Append shadow execution results
-				if len(shadowResults) > 0 {
-					text += "\n\n━━━ Local Shadow Execution ━━━\n"
-					for _, r := range shadowResults {
-						text += r + "\n"
-					}
-				}
-				if text == "" {
-					text = "(empty response)"
-				}
-				yield(&model.LLMResponse{
-					Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{Text: text}},
-					},
-					TurnComplete: true,
-					FinishReason: genai.FinishReasonStop,
-				}, nil)
-				return
+				body.Close()
+				goto streamDone
 
 			case "error":
+				body.Close()
 				m.mu.Lock()
 				m.convID = ""
 				m.lastSentPrompt = ""
@@ -249,14 +232,13 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				return
 			}
 		}
+		body.Close()
 
-		if textBuf.Len() > 0 {
+	streamDone:
+		if len(collectedTools) == 0 {
 			text := textBuf.String()
-			if len(shadowResults) > 0 {
-				text += "\n\n━━━ Local Shadow Execution ━━━\n"
-				for _, r := range shadowResults {
-					text += r + "\n"
-				}
+			if text == "" {
+				text = "(empty response)"
 			}
 			yield(&model.LLMResponse{
 				Content: &genai.Content{
@@ -266,8 +248,69 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 				TurnComplete: true,
 				FinishReason: genai.FinishReasonStop,
 			}, nil)
+			return
 		}
+
+		if m.Shadow == nil {
+			text := textBuf.String() + "\n[no shadow executor configured]"
+			yield(&model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: text}},
+				},
+				TurnComplete: true,
+				FinishReason: genai.FinishReasonStop,
+			}, nil)
+			return
+		}
+
+		var toolResults []ToolResult
+		for _, tb := range collectedTools {
+			result := m.Shadow.Execute(tb.name, tb.inputJSON.String())
+			isErr := strings.Contains(result, "exit=") && !strings.Contains(result, "exit=0")
+			toolResults = append(toolResults, ToolResult{
+				ToolUseID: tb.id,
+				Content:   result,
+				IsError:   isErr,
+			})
+			if stream {
+				yield(&model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{Text: fmt.Sprintf("\n[local %s → %s]\n", tb.name, truncate(result, 200))}},
+					},
+					Partial: true,
+				}, nil)
+			}
+		}
+
+		webReq = &CompletionRequest{
+			Prompt:            "",
+			Model:             m.modelName,
+			Timezone:          "Asia/Shanghai",
+			Locale:            "en-US",
+			Effort:            m.effort,
+			ThinkingMode:      "off",
+			RenderingMode:     "messages",
+			Attachments:       []json.RawMessage{},
+			Files:             []json.RawMessage{},
+			SyncSources:       []json.RawMessage{},
+			Tools:             []WebTool{},
+			ParentMessageUUID: parentMsgUUID,
+			ToolResults:       toolResults,
+		}
+
+		log.Printf("claudeweb: → tool_result round %d (%d results) parent=%s", round+1, len(toolResults), parentMsgUUID[:8])
 	}
+
+	yield(&model.LLMResponse{
+		Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: "[exceeded 20 tool rounds]"}},
+		},
+		TurnComplete: true,
+		FinishReason: genai.FinishReasonStop,
+	}, nil)
 }
 
 func (m *Model) extractPrompt(req *model.LLMRequest) string {
