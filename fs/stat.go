@@ -1,0 +1,58 @@
+// fs/stat.go — ported from linux-0.11/fs/stat.c
+// (C) 1991 Linus Torvalds
+package fs
+
+import (
+	. "google.golang.org/adk/v2/include"
+)
+
+// Stat structure for sys_stat/sys_fstat
+type Stat struct {
+	StDev   uint16
+	StIno   uint16
+	StMode  uint16
+	StNlink uint8
+	StUid   uint16
+	StGid   uint8
+	StRdev  uint16
+	StSize  uint32
+	StAtime uint32
+	StMtime uint32
+	StCtime uint32
+}
+
+// stat.c lines 126-145: cp_stat
+func cpStat(inode *MInode) Stat {
+	return Stat{
+		StDev:   inode.IDev,
+		StIno:   inode.INum,
+		StMode:  inode.IMode,
+		StNlink: inode.INlinks,
+		StUid:   inode.IUid,
+		StGid:   inode.IGid,
+		StRdev:  inode.IZone[0],
+		StSize:  inode.ISize,
+		StAtime: inode.IAtime,
+		StMtime: inode.IMtime,
+		StCtime: inode.ICtime,
+	}
+}
+
+// stat.c lines 147-156: sys_stat
+func SysStat(filename string) (Stat, int) {
+	var inode *MInode
+	if nameiFn != nil { inode = nameiFn(filename) }
+	if inode == nil { return Stat{}, -ENOENT }
+	st := cpStat(inode)
+	Iput(inode)
+	return st, 0
+}
+
+// stat.c lines 158-167: sys_fstat
+func SysFstat(fd uint32) (Stat, int) {
+	if fd >= NR_OPEN || Current.Filp[fd] == nil { return Stat{}, -EBADF }
+	f := Current.Filp[fd]
+	inode := f.FInode
+	if inode == nil { return Stat{}, -EBADF }
+	return cpStat(inode), 0
+}
