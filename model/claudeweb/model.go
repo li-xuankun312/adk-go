@@ -267,11 +267,9 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 		var toolResults []ToolResult
 		for _, tb := range collectedTools {
 			result := m.Shadow.Execute(tb.name, tb.inputJSON.String())
-			isErr := strings.Contains(result, "exit=") && !strings.Contains(result, "exit=0")
 			toolResults = append(toolResults, ToolResult{
 				ToolUseID: tb.id,
 				Content:   result,
-				IsError:   isErr,
 			})
 			if stream {
 				yield(&model.LLMResponse{

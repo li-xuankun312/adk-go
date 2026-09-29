@@ -46,7 +46,6 @@ type WebTool struct {
 type ToolResult struct {
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
-	IsError   bool   `json:"is_error,omitempty"`
 }
 
 // SSE Event types returned by the web API.
