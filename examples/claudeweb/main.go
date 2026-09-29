@@ -52,19 +52,15 @@ func main() {
 	kernel.SetContextLimit(0, 200000)
 	kernel.SetEffort(0, kernel.EFFORT_MEDIUM)
 	kernel.SetAgentCaps(0, kernel.CAP_ALL)
-
 	cowCtx0 := kernel.NewCOWContext(0)
 	cowCtx0.Append(fmt.Sprintf("system: model=%s effort=%s", cfg.modelName, cfg.effort))
 	chr_drv.GetAgentTty(0)
+	kernel.GlobalSessionTable.Create("main", 0, "", cfg.modelName)
 
-	sessID0 := fmt.Sprintf("init_%d", initTask.Pid)
-	kernel.GlobalSessionTable.Create(sessID0, 0, "", cfg.modelName)
-
-	fmt.Printf("  mem: task[0] pid=0 token_budget=500000 caps=all\n")
-	fmt.Printf("  tty: cooked mode, session %s\n", sessID0)
-	fmt.Printf("  model: %s effort=%s\n", cfg.modelName, cfg.effort)
+	fmt.Printf("  task[0]: pid=0 budget=500000 caps=all ctx=%d pages\n", cowCtx0.Len())
+	fmt.Printf("  tty0: cooked | model: %s | effort: %s\n", cfg.modelName, cfg.effort)
 	fmt.Printf("  cwd: %s\n", cfg.workDir)
-	fmt.Println("boot complete. type /help for commands.")
+	fmt.Println("  ready.")
 	fmt.Println()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -278,7 +274,7 @@ func main() {
 
 		default:
 			fmt.Println()
-			runPrompt(context.Background(), mainLLM, mainRunner, mainSessID, input, "")
+			osRunPrompt(mainLLM, mainRunner, mainSessID, input)
 			fmt.Println()
 		}
 	}
@@ -288,6 +284,8 @@ func runChildProcess(pid int64, prompt string) {
 	llm, r, sessID := newConversation(fmt.Sprintf("pid_%d", pid))
 	kernel.SetConvID(pid, llm.ConvID())
 	kernel.SetupBudgetAlarm(pid)
+	kernel.InheritCaps(0, pid)
+	kernel.GlobalSessionTable.Create(fmt.Sprintf("pid_%d", pid), pid, llm.ConvID(), cfg.modelName)
 
 	filtered, ok := chr_drv.AgentTtyProcess(pid, prompt)
 	if !ok {
@@ -378,27 +376,79 @@ func runChildProcess(pid int64, prompt string) {
 	log.Printf("[PID=%d] exited code=%s tokens=%d", pid, kernel.ExitCodeName(exitCode), totalTokens)
 }
 
-func runPrompt(ctx context.Context, llm *claudeweb.Model, r *runner.Runner, sessID string, prompt string, prefix string) {
-	msg := genai.NewContentFromText(prompt, "user")
+func osRunPrompt(llm *claudeweb.Model, r *runner.Runner, sessID string, input string) {
+	pid := int64(kernel.GetCurrent().Pid)
+
+	filtered, ok := chr_drv.AgentTtyProcess(pid, input)
+	if !ok {
+		fmt.Printf("[tty filter blocked]\n")
+		return
+	}
+
+	if !kernel.HasCap(pid, kernel.CAP_TOOL_USE) {
+		fmt.Printf("[no capability: tool_use]\n")
+		return
+	}
+
+	cowCtx := kernel.GetCOWContext(pid)
+	if cowCtx != nil {
+		cowCtx.Append(fmt.Sprintf("user: %s", filtered))
+	}
+
+	ctx := context.Background()
+	t := kernel.GetTask(pid)
+	if t != nil {
+		ctx = kernel.TaskCtx(t)
+	}
+
+	var result strings.Builder
+	var totalTokens int64
+	msg := genai.NewContentFromText(filtered, "user")
 	for event, err := range r.Run(ctx, "user", sessID, msg, agent.RunConfig{}) {
 		if err != nil {
-			fmt.Printf("%s[Error] %v\n", prefix, err)
+			fmt.Printf("[Error] %v\n", err)
 			break
 		}
 		if event.Content != nil {
 			for _, part := range event.Content.Parts {
 				if part.Text != "" {
-					if prefix != "" {
-						for _, line := range strings.Split(part.Text, "\n") {
-							fmt.Printf("%s%s\n", prefix, line)
-						}
-					} else {
-						fmt.Print(part.Text)
-					}
+					fmt.Print(part.Text)
+					result.WriteString(part.Text)
+					chunkTokens := int64(len(part.Text) / 4)
+					totalTokens += chunkTokens
+					kernel.AccountTokens(pid, chunkTokens)
 				}
 			}
 		}
 	}
+	fmt.Println()
+
+	resultStr := result.String()
+	if cowCtx != nil {
+		cowCtx.Append(fmt.Sprintf("assistant: %s", resultStr))
+		ctxTokens := cowCtx.TotalTokens()
+		kernel.AccountContext(pid, ctxTokens)
+		if t != nil && t.ContextLimit > 0 {
+			pct := ctxTokens * 100 / t.ContextLimit
+			if pct >= 80 {
+				fmt.Printf("[context %d%% full, compaction recommended]\n", pct)
+			}
+		}
+	}
+
+	cacheKey := fmt.Sprintf("turn_%d_%d", pid, kernel.GetCurrent().Stime)
+	kernel.GlobalPromptCache.Put(cacheKey, resultStr, totalTokens)
+
+	sess := kernel.GlobalSessionTable.GetByPid(pid)
+	if sess != nil {
+		kernel.GlobalSessionTable.Touch(sess.ID, totalTokens)
+	}
+
+	if t != nil && t.TokenBudget > 0 && t.TokenUsed > t.TokenBudget {
+		fmt.Printf("[token budget exceeded: %d/%d]\n", t.TokenUsed, t.TokenBudget)
+	}
+
+	fmt.Printf("[%d tokens]\n", totalTokens)
 }
 
 func newConversation(name string) (*claudeweb.Model, *runner.Runner, string) {
