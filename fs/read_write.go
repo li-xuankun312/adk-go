@@ -1,5 +1,3 @@
-// fs/read_write.go — ported from linux-0.11/fs/read_write.c
-// (C) 1991 Linus Torvalds
 package fs
 
 import (
@@ -8,18 +6,12 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// Additional errno
 const (
-	EBADF  = 9
-	ESPIPE = 29
-	EIO    = 5
 	EINVAL_FS = 22
 )
 
-// S_ISCHR
 func S_ISCHR(mode uint16) bool { return (mode & 0xF000) == 0x2000 }
 
-// Callbacks for device-layer dispatch
 var (
 	rwCharFn    func(rw int, dev uint16, buf []byte, count int, pos *int64) int
 	readPipeFn  func(inode *MInode, buf []byte, count int) int
@@ -40,7 +32,6 @@ func SetFileRead(fn func(*MInode, *File, []byte, int) int)            { fileRead
 func SetFileWrite(fn func(*MInode, *File, []byte, int) int)           { fileWriteFn = fn }
 func SetVerifyArea(fn func(uint32, int32))                             { verifyAreaFn = fn }
 
-// read_write.c lines 99-127: sys_lseek
 func SysLseek(fd uint32, offset int64, origin int) int64 {
 	if fd >= NR_OPEN || Current.Filp[fd] == nil { return -EBADF }
 	file := Current.Filp[fd]
@@ -48,13 +39,13 @@ func SysLseek(fd uint32, offset int64, origin int) int64 {
 	if !IS_SEEKABLE(int(MAJOR(uint32(file.FInode.IDev)))) { return -EBADF }
 	if file.FInode.IPipe != 0 { return -ESPIPE }
 	switch origin {
-	case 0: // SEEK_SET
+	case 0:
 		if offset < 0 { return -int64(EINVAL_FS) }
 		file.FPos = offset
-	case 1: // SEEK_CUR
+	case 1:
 		if file.FPos+offset < 0 { return -int64(EINVAL_FS) }
 		file.FPos += offset
-	case 2: // SEEK_END
+	case 2:
 		tmp := int64(file.FInode.ISize) + offset
 		if tmp < 0 { return -int64(EINVAL_FS) }
 		file.FPos = tmp
@@ -64,7 +55,6 @@ func SysLseek(fd uint32, offset int64, origin int) int64 {
 	return file.FPos
 }
 
-// read_write.c lines 129-155: sys_read
 func SysRead(fd uint32, buf []byte, count int) int {
 	if fd >= NR_OPEN || count < 0 || Current.Filp[fd] == nil {
 		return -EINVAL_FS
@@ -96,7 +86,6 @@ func SysRead(fd uint32, buf []byte, count int) int {
 	return -EINVAL_FS
 }
 
-// read_write.c lines 157-177: sys_write
 func SysWrite(fd uint32, buf []byte, count int) int {
 	if fd >= NR_OPEN || count < 0 || Current.Filp[fd] == nil {
 		return -EINVAL_FS

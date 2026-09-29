@@ -1,11 +1,5 @@
-// lib/string.go — ported from linux-0.11/lib/string.c
-// (C) 1991 Linus Torvalds
-//
-// The original is x86 assembly implementing string functions.
-// In Go, we use the standard library equivalents.
 package lib
 
-// string.c: inline_memcpy → copy()
 func Memcpy(dest, src []byte, n int) []byte {
 	if n > len(src) { n = len(src) }
 	if n > len(dest) { n = len(dest) }
@@ -13,15 +7,13 @@ func Memcpy(dest, src []byte, n int) []byte {
 	return dest
 }
 
-// string.c: memmove (handles overlapping regions)
 func Memmove(dest, src []byte, n int) []byte {
 	if n > len(src) { n = len(src) }
 	if n > len(dest) { n = len(dest) }
-	copy(dest[:n], src[:n]) // Go's copy handles overlap
+	copy(dest[:n], src[:n])
 	return dest
 }
 
-// string.c: memcmp
 func Memcmp(s1, s2 []byte, n int) int {
 	for i := 0; i < n; i++ {
 		if i >= len(s1) || i >= len(s2) { break }
@@ -31,24 +23,20 @@ func Memcmp(s1, s2 []byte, n int) int {
 	return 0
 }
 
-// string.c: memset
 func Memset(s []byte, c byte, n int) []byte {
 	if n > len(s) { n = len(s) }
 	for i := 0; i < n; i++ { s[i] = c }
 	return s
 }
 
-// string.c: strlen
 func Strlen(s string) int { return len(s) }
 
-// string.c: strcpy
 func Strcpy(dest []byte, src string) []byte {
 	n := copy(dest, src)
 	if n < len(dest) { dest[n] = 0 }
 	return dest
 }
 
-// string.c: strncpy
 func Strncpy(dest []byte, src string, n int) []byte {
 	i := 0
 	for ; i < n && i < len(src); i++ {
@@ -60,14 +48,12 @@ func Strncpy(dest []byte, src string, n int) []byte {
 	return dest
 }
 
-// string.c: strcmp
 func Strcmp(s1, s2 string) int {
 	if s1 < s2 { return -1 }
 	if s1 > s2 { return 1 }
 	return 0
 }
 
-// string.c: strncmp
 func Strncmp(s1, s2 string, n int) int {
 	if n > len(s1) { s1 += "\x00" }
 	if n > len(s2) { s2 += "\x00" }
@@ -79,7 +65,6 @@ func Strncmp(s1, s2 string, n int) int {
 	return 0
 }
 
-// string.c: strchr
 func Strchr(s string, c byte) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] == c { return i }
@@ -87,7 +72,6 @@ func Strchr(s string, c byte) int {
 	return -1
 }
 
-// string.c: strrchr
 func Strrchr(s string, c byte) int {
 	for i := len(s) - 1; i >= 0; i-- {
 		if s[i] == c { return i }
@@ -95,7 +79,6 @@ func Strrchr(s string, c byte) int {
 	return -1
 }
 
-// string.c: strcat
 func Strcat(dest []byte, src string) []byte {
 	end := 0
 	for end < len(dest) && dest[end] != 0 { end++ }
@@ -106,7 +89,6 @@ func Strcat(dest []byte, src string) []byte {
 	return dest
 }
 
-// string.c: strncat
 func Strncat(dest []byte, src string, n int) []byte {
 	end := 0
 	for end < len(dest) && dest[end] != 0 { end++ }

@@ -1,7 +1,3 @@
-// blk_drv/ll_rw_blk.go — ported from linux-0.11/kernel/blk_drv/ll_rw_blk.c
-// (C) 1991 Linus Torvalds
-//
-// This handles all read/write requests to block devices
 package blk_drv
 
 import (
@@ -11,17 +7,14 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// blk.h constants
 const (
 	NR_BLK_DEV = 7
 	NR_REQUEST = 32
-	WRITEA     = 3 // write-ahead
 )
 
-// blk.h lines 23-33: struct request
 type Request struct {
-	Dev       int             // -1 if no request
-	Cmd       int             // READ or WRITE
+	Dev       int
+	Cmd       int
 	Errors    int
 	Sector    uint32
 	NrSectors uint32
@@ -31,13 +24,11 @@ type Request struct {
 	Next      *Request
 }
 
-// blk.h lines 45-48: struct blk_dev_struct
 type BlkDevStruct struct {
-	RequestFn      func()   // do_request handler
+	RequestFn      func()
 	CurrentRequest *Request
 }
 
-// ll_rw_blk.c lines 21-40: globals
 var (
 	Requests       [NR_REQUEST]Request
 	WaitForRequest *TaskStruct
@@ -45,7 +36,6 @@ var (
 	blkMu          sync.Mutex
 )
 
-// Kernel callbacks
 var (
 	sleepOnFn func(**TaskStruct)
 	wakeUpFn  func(**TaskStruct)
@@ -54,7 +44,6 @@ var (
 func SetSleepOn(fn func(**TaskStruct)) { sleepOnFn = fn }
 func SetWakeUp(fn func(**TaskStruct))  { wakeUpFn = fn }
 
-// ll_rw_blk.c lines 42-49: lock_buffer
 func lockBuffer(bh *BufferHead) {
 	blkMu.Lock()
 	for bh.BLock != 0 {
@@ -66,7 +55,6 @@ func lockBuffer(bh *BufferHead) {
 	blkMu.Unlock()
 }
 
-// ll_rw_blk.c lines 51-57: unlock_buffer
 func unlockBuffer(bh *BufferHead) {
 	if bh.BLock == 0 {
 		log.Printf("blk_drv: buffer not locked")
@@ -75,7 +63,6 @@ func unlockBuffer(bh *BufferHead) {
 	if wakeUpFn != nil { wakeUpFn(&bh.BWait) }
 }
 
-// IN_ORDER: elevator algorithm comparator
 func inOrder(s1, s2 *Request) bool {
 	if s1.Cmd < s2.Cmd { return true }
 	if s1.Cmd == s2.Cmd {
@@ -85,7 +72,6 @@ func inOrder(s1, s2 *Request) bool {
 	return false
 }
 
-// ll_rw_blk.c lines 64-86: add_request
 func addRequest(dev *BlkDevStruct, req *Request) {
 	req.Next = nil
 	blkMu.Lock()
@@ -108,7 +94,6 @@ func addRequest(dev *BlkDevStruct, req *Request) {
 	blkMu.Unlock()
 }
 
-// ll_rw_blk.c lines 88-143: make_request
 func makeRequest(major, rw int, bh *BufferHead) {
 	rwAhead := (rw == READA || rw == WRITEA)
 	if rwAhead {
@@ -125,7 +110,6 @@ func makeRequest(major, rw int, bh *BufferHead) {
 		return
 	}
 repeat:
-	// Find an empty request
 	var req *Request
 	limit := NR_REQUEST
 	if rw != READ { limit = (NR_REQUEST * 2) / 3 }
@@ -152,7 +136,6 @@ repeat:
 	addRequest(&BlkDev[major], req)
 }
 
-// ll_rw_blk.c lines 145-155: ll_rw_block
 func LlRwBlock(rw int, bh *BufferHead) {
 	major := int(MAJOR(uint32(bh.BDev)))
 	if major >= NR_BLK_DEV || BlkDev[major].RequestFn == nil {
@@ -162,7 +145,6 @@ func LlRwBlock(rw int, bh *BufferHead) {
 	makeRequest(major, rw, bh)
 }
 
-// ll_rw_blk.c lines 157-165: blk_dev_init
 func BlkDevInit() {
 	for i := 0; i < NR_REQUEST; i++ {
 		Requests[i].Dev = -1
@@ -170,15 +152,11 @@ func BlkDevInit() {
 	}
 }
 
-// end_request — used by device drivers
 func EndRequest(uptodate int) {
-	dev := BlkDev // placeholder; real code indexes by MAJOR_NR
+	dev := BlkDev
 	_ = dev
-	// Generic: find current request from the right device
-	// In practice each driver calls this with its own MAJOR
 }
 
-// EndRequestForDev — driver calls this to complete a request
 func EndRequestForDev(major int, uptodate int) {
 	req := BlkDev[major].CurrentRequest
 	if req == nil { return }

@@ -1,7 +1,3 @@
-// fs/namei.go — ported from linux-0.11/fs/namei.c
-// (C) 1991 Linus Torvalds
-//
-// Some corrections by tytso.
 package fs
 
 import (
@@ -11,7 +7,6 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// namei.c constants
 const (
 	O_ACCMODE  = 03
 	O_WRONLY   = 01
@@ -24,25 +19,16 @@ const (
 	I_REGULAR  = 0100000
 	I_DIRECTORY = 0040000
 	S_ISVTX    = 01000
-	EEXIST     = 17
-	EISDIR     = 21
-	ENOSPC     = 28
-	ENOTEMPTY  = 39
-	EXDEV      = 18
-	ERROR      = 99
 )
 
-// sizeof(DirEntry) = 16+NAME_LEN = 16+14 = 16 (inode 2 bytes) + name 14 = 16
 const DIR_ENTRY_SIZE = 16
 const DIR_ENTRIES_PER_BLOCK_V = BLOCK_SIZE / DIR_ENTRY_SIZE
 
-// ACC_MODE: convert open flags to permission mask
 func accMode(flag int) int {
 	table := []int{4, 2, 6, 0xFF}
 	return table[flag&O_ACCMODE]
 }
 
-// namei.c lines 40-54: permission
 func permission(inode *MInode, mask int) bool {
 	mode := int(inode.IMode)
 	if inode.IDev != 0 && inode.INlinks == 0 { return false }
@@ -55,7 +41,6 @@ func permission(inode *MInode, mask int) bool {
 	return false
 }
 
-// namei.c lines 63-78: match
 func match(length int, name string, de *GoDirEntry) bool {
 	if de == nil || de.Inode == 0 || length > NAME_LEN { return false }
 	if length < NAME_LEN && length < len(de.Name) && de.Name[length] != 0 {
@@ -68,14 +53,11 @@ func match(length int, name string, de *GoDirEntry) bool {
 	return true
 }
 
-// GoDirEntry: Go-friendly version of struct dir_entry
-// In the C kernel, dir_entry is { unsigned short inode; char name[NAME_LEN]; }
 type GoDirEntry struct {
 	Inode uint16
 	Name  [NAME_LEN]byte
 }
 
-// readDirEntry reads a dir_entry from a buffer at offset
 func readDirEntry(data []byte, offset int) *GoDirEntry {
 	if offset+DIR_ENTRY_SIZE > len(data) { return nil }
 	de := &GoDirEntry{}
@@ -84,22 +66,19 @@ func readDirEntry(data []byte, offset int) *GoDirEntry {
 	return de
 }
 
-// writeDirEntry writes a dir_entry back to buffer
 func writeDirEntry(data []byte, offset int, de *GoDirEntry) {
 	if offset+DIR_ENTRY_SIZE > len(data) { return }
 	binary.LittleEndian.PutUint16(data[offset:], de.Inode)
 	copy(data[offset+2:offset+DIR_ENTRY_SIZE], de.Name[:])
 }
 
-// namei.c lines 91-153: find_entry
 func findEntry(dir **MInode, name string, namelen int) (*BufferHead, *GoDirEntry, int) {
 	if namelen > NAME_LEN { namelen = NAME_LEN }
 	entries := int((*dir).ISize) / DIR_ENTRY_SIZE
 	if namelen == 0 { return nil, nil, 0 }
-	// Handle ".." special cases
 	if namelen == 2 && name[0] == '.' && name[1] == '.' {
 		if *dir == Current.Root {
-			namelen = 1 // fake "."
+			namelen = 1
 		} else if (*dir).INum == ROOT_INO {
 			sb := GetSuper(int((*dir).IDev))
 			if sb != nil && sb.SImount != nil {
@@ -137,7 +116,6 @@ func findEntry(dir **MInode, name string, namelen int) (*BufferHead, *GoDirEntry
 	return nil, nil, 0
 }
 
-// namei.c lines 165-220: add_entry
 func addEntry(dir *MInode, name string, namelen int) (*BufferHead, *GoDirEntry, int) {
 	if namelen > NAME_LEN { namelen = NAME_LEN }
 	if namelen == 0 { return nil, nil, 0 }
@@ -157,7 +135,6 @@ func addEntry(dir *MInode, name string, namelen int) (*BufferHead, *GoDirEntry, 
 			deOff = 0
 		}
 		if uint32(i)*DIR_ENTRY_SIZE >= dir.ISize {
-			// Extending directory
 			de := &GoDirEntry{Inode: 0}
 			writeDirEntry(bh.BData, deOff, de)
 			dir.ISize = uint32((i + 1) * DIR_ENTRY_SIZE)
@@ -183,7 +160,6 @@ func addEntry(dir *MInode, name string, namelen int) (*BufferHead, *GoDirEntry, 
 	}
 }
 
-// namei.c lines 228-270: get_dir
 func getDir(pathname string) (*MInode, string) {
 	if Current.Root == nil || Current.Root.ICount == 0 {
 		log.Printf("fs: No root inode"); return nil, ""
@@ -213,7 +189,7 @@ func getDir(pathname string) (*MInode, string) {
 		if idx >= len(pathname) || pathname[idx] != '/' {
 			return inode, pathname[thisname:]
 		}
-		idx++ // skip '/'
+		idx++
 		bh, de, _ := findEntry(&inode, pathname[thisname:thisname+namelen], namelen)
 		if bh == nil { Iput(inode); return nil, "" }
 		inr := int(de.Inode)
@@ -225,11 +201,9 @@ func getDir(pathname string) (*MInode, string) {
 	}
 }
 
-// namei.c lines 278-294: dir_namei
 func dirNamei(pathname string) (*MInode, int, string) {
 	dir, remaining := getDir(pathname)
 	if dir == nil { return nil, 0, "" }
-	// Find the basename
 	basename := remaining
 	for i := 0; i < len(remaining); i++ {
 		if remaining[i] == '/' {
@@ -239,7 +213,6 @@ func dirNamei(pathname string) (*MInode, int, string) {
 	return dir, len(basename), basename
 }
 
-// namei.c lines 303-330: namei
 func Namei(pathname string) *MInode {
 	dir, namelen, basename := dirNamei(pathname)
 	if dir == nil { return nil }
@@ -258,7 +231,6 @@ func Namei(pathname string) *MInode {
 	return inode
 }
 
-// namei.c lines 337-410: open_namei
 func OpenNamei(pathname string, flag, mode int, resInode **MInode) int {
 	if (flag&O_TRUNC) != 0 && (flag&O_ACCMODE) == 0 {
 		flag |= O_WRONLY
@@ -287,7 +259,7 @@ func OpenNamei(pathname string, flag, mode int, resInode **MInode) int {
 			inode.INlinks--; Iput(inode); Iput(dir); return -ENOSPC
 		}
 		de2.Inode = inode.INum
-		writeDirEntry(bh2.BData, 0, de2) // rewrite
+		writeDirEntry(bh2.BData, 0, de2)
 		bh2.BDirt = 1; Brelse(bh2); Iput(dir)
 		*resInode = inode; return 0
 	}
@@ -307,7 +279,6 @@ func OpenNamei(pathname string, flag, mode int, resInode **MInode) int {
 	return 0
 }
 
-// namei.c lines 412-461: sys_mknod
 func SysMknod(filename string, mode, dev int) int {
 	if !suser() { return -EPERM }
 	dir, namelen, basename := dirNamei(filename)
@@ -332,7 +303,6 @@ func SysMknod(filename string, mode, dev int) int {
 	return 0
 }
 
-// namei.c lines 463-538: sys_mkdir
 func SysMkdir(pathname string, mode int) int {
 	if !suser() { return -EPERM }
 	dir, namelen, basename := dirNamei(pathname)
@@ -353,11 +323,9 @@ func SysMkdir(pathname string, mode int) int {
 	if dirBlock == nil {
 		Iput(dir); FreeBlock(int(inode.IDev), nb); inode.INlinks--; Iput(inode); return -ERROR
 	}
-	// Write "." entry
 	dot := &GoDirEntry{Inode: inode.INum}
 	dot.Name[0] = '.'
 	writeDirEntry(dirBlock.BData, 0, dot)
-	// Write ".." entry
 	dotdot := &GoDirEntry{Inode: dir.INum}
 	dotdot.Name[0] = '.'; dotdot.Name[1] = '.'
 	writeDirEntry(dirBlock.BData, DIR_ENTRY_SIZE, dotdot)
@@ -376,7 +344,6 @@ func SysMkdir(pathname string, mode int) int {
 	return 0
 }
 
-// namei.c lines 543-585: empty_dir
 func emptyDir(inode *MInode) bool {
 	nEntries := int(inode.ISize) / DIR_ENTRY_SIZE
 	if nEntries < 2 || inode.IZone[0] == 0 { return false }
@@ -407,7 +374,6 @@ func emptyDir(inode *MInode) bool {
 	return true
 }
 
-// namei.c lines 587-661: sys_rmdir
 func SysRmdir(name string) int {
 	if !suser() { return -EPERM }
 	dir, namelen, basename := dirNamei(name)
@@ -439,7 +405,6 @@ func SysRmdir(name string) int {
 	return 0
 }
 
-// namei.c lines 663-719: sys_unlink
 func SysUnlink(name string) int {
 	dir, namelen, basename := dirNamei(name)
 	if dir == nil { return -ENOENT }
@@ -467,7 +432,6 @@ func SysUnlink(name string) int {
 	return 0
 }
 
-// namei.c lines 721-778: sys_link
 func SysLink(oldname, newname string) int {
 	oldinode := Namei(oldname)
 	if oldinode == nil { return -ENOENT }

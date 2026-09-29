@@ -1,7 +1,3 @@
-// fs/bitmap.go — ported from linux-0.11/fs/bitmap.c
-// (C) 1991 Linus Torvalds
-//
-// bitmap.c contains the code that handles the inode and block bitmaps
 package fs
 
 import (
@@ -10,7 +6,6 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// bitmap.c lines 47-73: free_block
 func FreeBlock(dev, block int) {
 	sb := GetSuper(dev)
 	if sb == nil {
@@ -42,7 +37,6 @@ func FreeBlock(dev, block int) {
 	}
 }
 
-// bitmap.c lines 75-105: new_block
 func NewBlock(dev int) int {
 	sb := GetSuper(dev)
 	if sb == nil {
@@ -81,7 +75,6 @@ func NewBlock(dev int) int {
 	return j
 }
 
-// bitmap.c lines 107-134: free_inode
 func FreeInode(inode *MInode) {
 	if inode == nil { return }
 	if inode.IDev == 0 {
@@ -117,7 +110,6 @@ func FreeInode(inode *MInode) {
 	*inode = MInode{}
 }
 
-// bitmap.c lines 136-168: new_inode
 func NewInode(dev int) *MInode {
 	inode := GetEmptyInode()
 	if inode == nil { return nil }

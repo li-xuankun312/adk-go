@@ -1,7 +1,3 @@
-// fs/super.go — ported from linux-0.11/fs/super.c
-// (C) 1991 Linus Torvalds
-//
-// super.c contains code to handle the super-block tables.
 package fs
 
 import (
@@ -12,25 +8,15 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// Error codes
 const (
-	ENOENT  = 2
-	ENOTBLK = 15
-	EBUSY   = 16
-	EPERM   = 1
 )
 
-// super.c line 27
 var SuperBlockTable [NR_SUPER]SuperBlock
 
-// super.c line 29: ROOT_DEV is in include/fs.go
+var superMu sync.Mutex
 
-var superMu sync.Mutex // replaces cli/sti
-
-// S_ISDIR
 func S_ISDIR(mode uint16) bool { return (mode & 0xF000) == 0x4000 }
 
-// super.c lines 31-38: lock_super
 func lockSuper(sb *SuperBlock) {
 	superMu.Lock()
 	for sb.SLock != 0 {
@@ -42,13 +28,11 @@ func lockSuper(sb *SuperBlock) {
 	superMu.Unlock()
 }
 
-// super.c lines 40-46: free_super
 func freeSuper(sb *SuperBlock) {
 	sb.SLock = 0
 	if wakeUpFn != nil { wakeUpFn(&sb.SWait) }
 }
 
-// super.c lines 48-54: wait_on_super
 func waitOnSuper(sb *SuperBlock) {
 	superMu.Lock()
 	for sb.SLock != 0 {
@@ -59,7 +43,6 @@ func waitOnSuper(sb *SuperBlock) {
 	superMu.Unlock()
 }
 
-// super.c lines 56-72: get_super
 func GetSuper(dev int) *SuperBlock {
 	if dev == 0 { return nil }
 	for i := 0; i < NR_SUPER; i++ {
@@ -67,14 +50,13 @@ func GetSuper(dev int) *SuperBlock {
 		if s.SDev == uint16(dev) {
 			waitOnSuper(s)
 			if s.SDev == uint16(dev) { return s }
-			i = -1 // restart
+			i = -1
 			continue
 		}
 	}
 	return nil
 }
 
-// super.c lines 74-98: put_super
 func PutSuper(dev int) {
 	if dev == ROOT_DEV {
 		log.Printf("fs: root diskette changed: prepare for armageddon")
@@ -93,12 +75,10 @@ func PutSuper(dev int) {
 	freeSuper(sb)
 }
 
-// super.c lines 100-165: read_super
 func readSuper(dev int) *SuperBlock {
 	if dev == 0 { return nil }
 	CheckDiskChange(dev)
 	if s := GetSuper(dev); s != nil { return s }
-	// Find free slot
 	var s *SuperBlock
 	for i := 0; i < NR_SUPER; i++ {
 		if SuperBlockTable[i].SDev == 0 {
@@ -118,7 +98,6 @@ func readSuper(dev int) *SuperBlock {
 	if bh == nil {
 		s.SDev = 0; freeSuper(s); return nil
 	}
-	// Copy d_super_block from buffer
 	if len(bh.BData) >= 20 {
 		s.SNinodes = binary.LittleEndian.Uint16(bh.BData[0:])
 		s.SNzones = binary.LittleEndian.Uint16(bh.BData[2:])
@@ -155,12 +134,10 @@ func readSuper(dev int) *SuperBlock {
 	return s
 }
 
-// Namei callback (avoids circular with namei.go if it were separate pkg)
 var nameiFn func(string) *MInode
 
 func SetNamei(fn func(string) *MInode) { nameiFn = fn }
 
-// super.c lines 167-198: sys_umount
 func SysUmount(devName string) int {
 	var inode *MInode
 	if nameiFn != nil { inode = nameiFn(devName) }
@@ -189,7 +166,6 @@ func SysUmount(devName string) int {
 	return 0
 }
 
-// super.c lines 200-240: sys_mount
 func SysMount(devName, dirName string, rwFlag int) int {
 	var devI, dirI *MInode
 	if nameiFn != nil { devI = nameiFn(devName) }
@@ -213,10 +189,8 @@ func SysMount(devName, dirName string, rwFlag int) int {
 	return 0
 }
 
-// File table — super.c line 250-251: file_table used in mount_root
 var FileTable [NR_FILE]File
 
-// super.c lines 242-281: mount_root
 func MountRoot() {
 	for i := 0; i < NR_FILE; i++ { FileTable[i].FCount = 0 }
 	for i := 0; i < NR_SUPER; i++ {
@@ -233,7 +207,6 @@ func MountRoot() {
 	p.SImount = mi
 	Current.Pwd = mi
 	Current.Root = mi
-	// Count free zones
 	free := 0
 	for i := int(p.SNzones) - 1; i >= 0; i-- {
 		if p.SZmap[i>>13] != nil && !setBit(i&8191, p.SZmap[i>>13].BData) {
@@ -241,7 +214,6 @@ func MountRoot() {
 		}
 	}
 	log.Printf("fs: %d/%d free blocks", free, p.SNzones)
-	// Count free inodes
 	free = 0
 	for i := int(p.SNinodes); i >= 0; i-- {
 		if p.SImap[i>>13] != nil && !setBit(i&8191, p.SImap[i>>13].BData) {
@@ -251,7 +223,6 @@ func MountRoot() {
 	log.Printf("fs: %d/%d free inodes", free, p.SNinodes)
 }
 
-// setBit: test and set a bit in a byte array, returns old value
 func setBit(nr int, addr []byte) bool {
 	if addr == nil { return true }
 	byteIdx := nr >> 3
@@ -262,7 +233,6 @@ func setBit(nr int, addr []byte) bool {
 	return old != 0
 }
 
-// clearBit: test and clear a bit, returns old value
 func clearBit(nr int, addr []byte) bool {
 	if addr == nil { return true }
 	byteIdx := nr >> 3
@@ -273,7 +243,6 @@ func clearBit(nr int, addr []byte) bool {
 	return old != 0
 }
 
-// findFirstZero: find first zero bit in data block
 func findFirstZero(addr []byte) int {
 	for i := 0; i < 8192; i++ {
 		byteIdx := i >> 3
@@ -284,7 +253,6 @@ func findFirstZero(addr []byte) int {
 	return 8192
 }
 
-// clearBlock: zero out a 1024-byte block
 func clearBlock(addr []byte) {
 	for i := range addr { addr[i] = 0 }
 }

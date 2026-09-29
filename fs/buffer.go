@@ -1,9 +1,3 @@
-// fs/buffer.go — ported from linux-0.11/fs/buffer.c
-// (C) 1991 Linus Torvalds
-//
-// 'buffer.c' implements the buffer-cache functions. Race-conditions have
-// been avoided by NEVER letting an interrupt change a buffer (except for the
-// data, of course), but instead letting the caller do it.
 package fs
 
 import (
@@ -13,19 +7,17 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// buffer.c lines 33-37: globals
 var (
-	StartBuffer *BufferHead              // struct buffer_head * start_buffer
-	hashTable   [NR_HASH]*BufferHead     // struct buffer_head * hash_table[NR_HASH]
-	freeList    *BufferHead              // static struct buffer_head * free_list
-	bufferWait  *TaskStruct              // static struct task_struct * buffer_wait
-	NrBuffers   int                      // int NR_BUFFERS
-	buffers     []BufferHead             // pre-allocated buffer head array
-	bufferData  []byte                   // backing storage for buffer data blocks
-	bufMu       sync.Mutex               // replaces cli/sti
+	StartBuffer *BufferHead
+	hashTable   [NR_HASH]*BufferHead
+	freeList    *BufferHead
+	bufferWait  *TaskStruct
+	NrBuffers   int
+	buffers     []BufferHead
+	bufferData  []byte
+	bufMu       sync.Mutex
 )
 
-// Kernel callback functions (avoids circular import)
 var (
 	sleepOnFn  func(**TaskStruct)
 	wakeUpFn   func(**TaskStruct)
@@ -42,7 +34,6 @@ func SetSyncInodes(fn func())                    { syncInodesFn = fn }
 func SetPutSuper(fn func(int))                   { putSuperFn = fn }
 func SetInvalidateInodes(fn func(int))           { invalidateInodesFn = fn }
 
-// buffer.c lines 39-45: wait_on_buffer
 func waitOnBuffer(bh *BufferHead) {
 	bufMu.Lock()
 	for bh.BLock != 0 {
@@ -55,7 +46,6 @@ func waitOnBuffer(bh *BufferHead) {
 	bufMu.Unlock()
 }
 
-// buffer.c lines 47-60: sys_sync
 func SysSync() int {
 	SyncInodes()
 	for i := 0; i < NrBuffers; i++ {
@@ -68,7 +58,6 @@ func SysSync() int {
 	return 0
 }
 
-// buffer.c lines 62-85: sync_dev
 func SyncDev(dev int) int {
 	for i := 0; i < NrBuffers; i++ {
 		bh := &buffers[i]
@@ -90,7 +79,6 @@ func SyncDev(dev int) int {
 	return 0
 }
 
-// buffer.c lines 87-100: invalidate_buffers
 func invalidateBuffers(dev int) {
 	for i := 0; i < NrBuffers; i++ {
 		bh := &buffers[i]
@@ -103,19 +91,15 @@ func invalidateBuffers(dev int) {
 	}
 }
 
-// buffer.c lines 116-129: check_disk_change
 func CheckDiskChange(dev int) {
 	if MAJOR(uint32(dev)) != 2 { return }
-	// floppy_change — stubbed for Go port
 	invalidateBuffers(dev)
 }
 
-// buffer.c lines 131-132: hash function
 func hashfn(dev, block int) int {
 	return int(uint(dev^block) % NR_HASH)
 }
 
-// buffer.c lines 134-150: remove_from_queues
 func removeFromQueues(bh *BufferHead) {
 	if bh.BNext != nil { bh.BNext.BPrev = bh.BPrev }
 	if bh.BPrev != nil { bh.BPrev.BNext = bh.BNext }
@@ -131,7 +115,6 @@ func removeFromQueues(bh *BufferHead) {
 	if freeList == bh { freeList = bh.BNextFree }
 }
 
-// buffer.c lines 152-167: insert_into_queues
 func insertIntoQueues(bh *BufferHead) {
 	bh.BNextFree = freeList
 	bh.BPrevFree = freeList.BPrevFree
@@ -145,7 +128,6 @@ func insertIntoQueues(bh *BufferHead) {
 	if bh.BNext != nil { bh.BNext.BPrev = bh }
 }
 
-// buffer.c lines 169-177: find_buffer
 func findBuffer(dev, block int) *BufferHead {
 	for tmp := hashTable[hashfn(dev, block)]; tmp != nil; tmp = tmp.BNext {
 		if tmp.BDev == uint16(dev) && tmp.BBlocknr == uint32(block) {
@@ -155,7 +137,6 @@ func findBuffer(dev, block int) *BufferHead {
 	return nil
 }
 
-// buffer.c lines 186-199: get_hash_table
 func GetHashTable(dev, block int) *BufferHead {
 	for {
 		bh := findBuffer(dev, block)
@@ -169,10 +150,8 @@ func GetHashTable(dev, block int) *BufferHead {
 	}
 }
 
-// buffer.c line 208
 func badness(bh *BufferHead) int { return int(bh.BDirt)<<1 + int(bh.BLock) }
 
-// buffer.c lines 209-254: getblk
 func Getblk(dev, block int) *BufferHead {
 repeat:
 	if bh := GetHashTable(dev, block); bh != nil { return bh }
@@ -210,7 +189,6 @@ repeat:
 	return bh
 }
 
-// buffer.c lines 256-264: brelse
 func Brelse(buf *BufferHead) {
 	if buf == nil { return }
 	waitOnBuffer(buf)
@@ -222,7 +200,6 @@ func Brelse(buf *BufferHead) {
 	if wakeUpFn != nil { wakeUpFn(&bufferWait) }
 }
 
-// buffer.c lines 270-284: bread
 func Bread(dev, block int) *BufferHead {
 	bh := Getblk(dev, block)
 	if bh == nil { log.Printf("fs: bread: getblk returned NULL"); return nil }
@@ -234,7 +211,6 @@ func Bread(dev, block int) *BufferHead {
 	return nil
 }
 
-// buffer.c lines 299-318: bread_page
 func BreadPage(address uint32, dev int, b [4]int) {
 	var bh [4]*BufferHead
 	for i := 0; i < 4; i++ {
@@ -246,14 +222,12 @@ func BreadPage(address uint32, dev int, b [4]int) {
 	for i := 0; i < 4; i++ {
 		if bh[i] != nil {
 			waitOnBuffer(bh[i])
-			// COPYBLK(bh[i]->b_data, address) — copy to physmem
 			Brelse(bh[i])
 		}
 		address += BLOCK_SIZE
 	}
 }
 
-// buffer.c lines 325-349: breada
 func Breada(dev, first int, blocks ...int) *BufferHead {
 	bh := Getblk(dev, first)
 	if bh == nil { log.Printf("fs: breada: getblk returned NULL"); return nil }
@@ -272,12 +246,10 @@ func Breada(dev, first int, blocks ...int) *BufferHead {
 	return nil
 }
 
-// llRwBlock wrapper
 func llRwBlock(rw int, bh *BufferHead) {
 	if llRwBlockFn != nil { llRwBlockFn(rw, bh) }
 }
 
-// buffer.c lines 351-384: buffer_init
 func BufferInit(bufferEnd int32) {
 	numBuffers := 256
 	if bufferEnd > 0 {

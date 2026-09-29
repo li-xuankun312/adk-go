@@ -1,5 +1,3 @@
-// fs/open.go — ported from linux-0.11/fs/open.c
-// (C) 1991 Linus Torvalds
 package fs
 
 import (
@@ -10,13 +8,10 @@ import (
 
 const (
 	ENOSYS_FS = 38
-	EACCES    = 13
-	ENOTDIR   = 20
 	O_CREAT   = 0100
 	O_TRUNC   = 01000
 )
 
-// Callbacks
 var (
 	openNameiFn func(pathname string, flag, mode int, resInode **MInode) int
 	suserFn     func() bool
@@ -30,10 +25,8 @@ func suser() bool {
 	return Current.Euid == 0
 }
 
-// open.c lines 19-22: sys_ustat
 func SysUstat() int { return -ENOSYS_FS }
 
-// open.c lines 24-41: sys_utime
 func SysUtime(filename string, actime, modtime int32) int {
 	var inode *MInode
 	if nameiFn != nil { inode = nameiFn(filename) }
@@ -50,7 +43,6 @@ func SysUtime(filename string, actime, modtime int32) int {
 	return 0
 }
 
-// open.c lines 47-73: sys_access
 func SysAccess(filename string, mode int) int {
 	mode &= 0007
 	var inode *MInode
@@ -65,7 +57,6 @@ func SysAccess(filename string, mode int) int {
 	return -EACCES
 }
 
-// open.c lines 75-88: sys_chdir
 func SysChdir(filename string) int {
 	var inode *MInode
 	if nameiFn != nil { inode = nameiFn(filename) }
@@ -76,7 +67,6 @@ func SysChdir(filename string) int {
 	return 0
 }
 
-// open.c lines 90-103: sys_chroot
 func SysChroot(filename string) int {
 	var inode *MInode
 	if nameiFn != nil { inode = nameiFn(filename) }
@@ -87,7 +77,6 @@ func SysChroot(filename string) int {
 	return 0
 }
 
-// open.c lines 105-119: sys_chmod
 func SysChmod(filename string, mode int) int {
 	var inode *MInode
 	if nameiFn != nil { inode = nameiFn(filename) }
@@ -101,7 +90,6 @@ func SysChmod(filename string, mode int) int {
 	return 0
 }
 
-// open.c lines 121-136: sys_chown
 func SysChown(filename string, uid, gid int) int {
 	var inode *MInode
 	if nameiFn != nil { inode = nameiFn(filename) }
@@ -114,17 +102,14 @@ func SysChown(filename string, uid, gid int) int {
 	return 0
 }
 
-// open.c lines 138-186: sys_open
 func SysOpen(filename string, flag, mode int) int {
 	mode &= 0777 & ^int(Current.Umask)
-	// Find free fd
 	fd := -1
 	for i := 0; i < NR_OPEN; i++ {
 		if Current.Filp[i] == nil { fd = i; break }
 	}
 	if fd < 0 { return -EINVAL_FS }
 	Current.CloseOnExec &^= uint32(1 << fd)
-	// Find free file table entry
 	var f *File
 	for i := 0; i < NR_FILE; i++ {
 		if FileTable[i].FCount == 0 { f = &FileTable[i]; break }
@@ -141,7 +126,6 @@ func SysOpen(filename string, flag, mode int) int {
 			return ret
 		}
 	}
-	// TTY handling — simplified for Go port
 	if inode != nil && S_ISCHR(inode.IMode) {
 		if MAJOR(uint32(inode.IZone[0])) == 4 {
 			if Current.Leader != 0 && Current.Tty < 0 {
@@ -169,12 +153,10 @@ func SysOpen(filename string, flag, mode int) int {
 	return fd
 }
 
-// open.c lines 188-191: sys_creat
 func SysCreat(pathname string, mode int) int {
 	return SysOpen(pathname, O_CREAT|O_TRUNC, mode)
 }
 
-// open.c lines 193-209: sys_close
 func SysCloseFS(fd int) int {
 	if fd >= NR_OPEN { return -EINVAL_FS }
 	Current.CloseOnExec &^= uint32(1 << fd)

@@ -1,8 +1,3 @@
-// chr_drv/tty_io.go — ported from linux-0.11/kernel/chr_drv/tty_io.c
-// (C) 1991 Linus Torvalds
-//
-// 'tty_io.c' gives an orthogonal feeling to tty's, be they consoles
-// or rs-channels. It also implements echoing, cooked mode etc.
 package chr_drv
 
 import (
@@ -13,7 +8,6 @@ import (
 	. "google.golang.org/adk/v2/include"
 )
 
-// termios constants
 const (
 	ICRNL   = 0000400
 	INLCR   = 0000100
@@ -35,44 +29,34 @@ const (
 	CS8     = 0000060
 	VTIME   = 5
 	VMIN    = 6
-	EINTR   = 4
 	NR_TTY  = 3
 	TTY_BUF_SIZE = 1024
 )
 
-// Signal masks
 const (
-	SIGALRM  = 14
-	SIGKILL  = 9
-	SIGINT   = 2
-	SIGQUIT  = 3
-	SIGTSTP  = 20
 	ALRMMASK = 1 << (SIGALRM - 1)
 	KILLMASK = 1 << (SIGKILL - 1)
 	INTMASK  = 1 << (SIGINT - 1)
 	QUITMASK = 1 << (SIGQUIT - 1)
 )
 
-// Termios structure
 type Termios struct {
 	CIflag uint32
 	COflag uint32
 	CCflag uint32
 	CLflag uint32
 	CLine  uint8
-	CCc    [8]uint8 // control characters
+	CCc    [8]uint8
 }
 
-// tty_queue: circular buffer
 type TtyQueue struct {
-	Data     int // lines available (for secondary)
+	Data     int
 	Head     int
 	Tail     int
 	ProcList *TaskStruct
 	Buf      [TTY_BUF_SIZE]byte
 }
 
-// Queue operations
 func (q *TtyQueue) Empty() bool { return q.Head == q.Tail }
 func (q *TtyQueue) Full() bool  { return ((q.Head + 1) % TTY_BUF_SIZE) == q.Tail }
 func (q *TtyQueue) Left() int {
@@ -95,7 +79,6 @@ func (q *TtyQueue) Putch(c byte) {
 	q.Head = (q.Head + 1) % TTY_BUF_SIZE
 }
 
-// TtyStruct
 type TtyStruct struct {
 	Termios   Termios
 	Pgrp      int
@@ -107,7 +90,6 @@ type TtyStruct struct {
 	mu        sync.Mutex
 }
 
-// Control character accessors
 func killChar(tty *TtyStruct) byte  { return tty.Termios.CCc[2] }
 func eraseChar(tty *TtyStruct) byte { return tty.Termios.CCc[1] }
 func eofChar(tty *TtyStruct) byte   { return tty.Termios.CCc[0] }
@@ -116,18 +98,14 @@ func startChar(tty *TtyStruct) byte { return tty.Termios.CCc[3] }
 func intrChar(tty *TtyStruct) byte  { return tty.Termios.CCc[5] }
 func quitChar(tty *TtyStruct) byte  { return tty.Termios.CCc[6] }
 
-// Flag checks
 func lFlag(tty *TtyStruct, f uint32) bool { return tty.Termios.CLflag&f != 0 }
 func iFlag(tty *TtyStruct, f uint32) bool { return tty.Termios.CIflag&f != 0 }
 func oFlag(tty *TtyStruct, f uint32) bool { return tty.Termios.COflag&f != 0 }
 
-// Default control characters: DEL=0, BS=1, ^U=2, ^C=3, ^Q=4, ^S=5, ^C=6, ^\=7
 var initCCc = [8]uint8{4, 0177, 025, 034, 021, 023, 003, 034}
 
-// tty_table: 3 terminals (console + 2 serial)
 var TtyTable [NR_TTY]TtyStruct
 
-// Kernel callbacks
 var (
 	interruptibleSleepOnFn func(**TaskStruct)
 	wakeUpFn               func(**TaskStruct)
@@ -138,9 +116,7 @@ func SetInterruptibleSleepOn(fn func(**TaskStruct)) { interruptibleSleepOnFn = f
 func SetWakeUp(fn func(**TaskStruct))               { wakeUpFn = fn }
 func SetSchedule(fn func())                         { scheduleFn = fn }
 
-// tty_io.c lines 105-109: tty_init
 func TtyInit() {
-	// Console tty
 	TtyTable[0].Termios = Termios{
 		CIflag: ICRNL,
 		COflag: OPOST | ONLCR,
@@ -150,14 +126,12 @@ func TtyInit() {
 	}
 	TtyTable[0].WriteFn = ConWrite
 
-	// Serial 1
 	TtyTable[1].Termios = Termios{
 		CCflag: B2400 | CS8,
 		CCc:    initCCc,
 	}
 	TtyTable[1].WriteFn = RsWrite
 
-	// Serial 2
 	TtyTable[2].Termios = Termios{
 		CCflag: B2400 | CS8,
 		CCc:    initCCc,
@@ -165,17 +139,15 @@ func TtyInit() {
 	TtyTable[2].WriteFn = RsWrite
 }
 
-// tty_io.c lines 111-120: tty_intr
 func TtyIntr(tty *TtyStruct, mask uint32) {
 	if tty.Pgrp <= 0 { return }
 	for i := 0; i < NR_TASKS; i++ {
-		if Task[i] != nil && Task[i].Pgrp == int16(tty.Pgrp) {
-			Task[i].Signal |= mask
+		if Task[i] != nil && Task[i].Pgrp == int32(tty.Pgrp) {
+			Task[i].Signal |= int32(mask)
 		}
 	}
 }
 
-// tty_io.c lines 122-128: sleep_if_empty
 func sleepIfEmpty(queue *TtyQueue) {
 	for !queue.Empty() { return }
 	if Current.Signal == 0 && queue.Empty() {
@@ -185,7 +157,6 @@ func sleepIfEmpty(queue *TtyQueue) {
 	}
 }
 
-// tty_io.c lines 130-138: sleep_if_full
 func sleepIfFull(queue *TtyQueue) {
 	if !queue.Full() { return }
 	if Current.Signal == 0 && queue.Left() < 128 {
@@ -195,7 +166,6 @@ func sleepIfFull(queue *TtyQueue) {
 	}
 }
 
-// tty_io.c lines 145-228: copy_to_cooked
 func CopyToCooked(tty *TtyStruct) {
 	for !tty.ReadQ.Empty() && !tty.Secondary.Full() {
 		c := int8(tty.ReadQ.Getch())
@@ -257,7 +227,6 @@ func CopyToCooked(tty *TtyStruct) {
 	if wakeUpFn != nil { wakeUpFn(&tty.Secondary.ProcList) }
 }
 
-// tty_io.c lines 230-289: tty_read
 func TtyRead(channel uint16, buf []byte, nr int) int {
 	if int(channel) >= NR_TTY || nr < 0 { return -1 }
 	tty := &TtyTable[channel]
@@ -286,7 +255,6 @@ func TtyRead(channel uint16, buf []byte, nr int) int {
 	return b
 }
 
-// tty_io.c lines 291-327: tty_write
 func TtyWrite(channel uint16, buf []byte, nr int) int {
 	if int(channel) >= NR_TTY || nr < 0 { return -1 }
 	tty := &TtyTable[channel]
@@ -314,24 +282,19 @@ func TtyWrite(channel uint16, buf []byte, nr int) int {
 	return b
 }
 
-// tty_io.c lines 343-346: do_tty_interrupt
 func DoTtyInterrupt(ttyNr int) {
 	if ttyNr >= 0 && ttyNr < NR_TTY { CopyToCooked(&TtyTable[ttyNr]) }
 }
 
-// tty_io.c lines 348-350: chr_dev_init
 func ChrDevInit() {}
 
-// Placeholder write functions (to be replaced by console/serial)
 func ConWrite(tty *TtyStruct) {
-	// Console write — drains write queue to stdout
 	for !tty.WriteQ.Empty() {
-		_ = tty.WriteQ.Getch() // discard in stub
+		_ = tty.WriteQ.Getch()
 	}
 }
 
 func RsWrite(tty *TtyStruct) {
-	// Serial write — stub
 	for !tty.WriteQ.Empty() {
 		_ = tty.WriteQ.Getch()
 	}

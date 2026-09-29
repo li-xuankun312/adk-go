@@ -1,8 +1,3 @@
-// fs/exec.go — ported from linux-0.11/fs/exec.c
-// (C) 1991 Linus Torvalds
-//
-// #!-checking implemented by tytso.
-// Demand-loading implemented 01.12.91
 package fs
 
 import (
@@ -15,15 +10,12 @@ import (
 
 const (
 	MAX_ARG_PAGES = 32
-	ENOEXEC       = 8
-	ENOMEM        = 12
 	S_ISUID       = 04000
 	S_ISGID       = 02000
-	ZMAGIC        = 0x10B // a.out magic
+	ZMAGIC        = 0x10B
 	N_TXTOFF_VAL  = BLOCK_SIZE
 )
 
-// Exec header — matches a.out struct exec
 type ExecHeader struct {
 	AMagic  uint32
 	AText   uint32
@@ -35,7 +27,6 @@ type ExecHeader struct {
 	ADrsize uint32
 }
 
-// Callbacks for page/process ops
 var (
 	freePageTablesFn  func(uint32, uint32)
 	putPageFn         func(uint32, uint32)
@@ -48,7 +39,6 @@ func SetPutPage(fn func(uint32, uint32))        { putPageFn = fn }
 func SetSysExit(fn func(int))                   { sysExitFn = fn }
 func SetSysClose(fn func(int) int)              { sysCloseFn = fn }
 
-// readExecHeader from buffer
 func readExecHeader(data []byte) ExecHeader {
 	var ex ExecHeader
 	if len(data) < 32 { return ex }
@@ -63,39 +53,35 @@ func readExecHeader(data []byte) ExecHeader {
 	return ex
 }
 
-// exec.c lines 46-70: create_tables (simplified for Go)
-// In Go, we store args/envs directly in the task's memory area.
 func createTables(args []string, envs []string) (uint32, []string, []string) {
-	// Return a simulated stack pointer
 	return PAGE_SIZE * MAX_ARG_PAGES - 4, args, envs
 }
 
-// exec.c lines 75-85: count — trivial in Go
 func countArgs(argv []string) int { return len(argv) }
 
-// exec.c lines 104-152: copy_strings — in Go, strings are already in memory
-// This is a no-op in Go since we don't need segmented memory copying.
 func copyStrings(argv []string, page []uint32, p uint32) uint32 {
 	for _, s := range argv {
-		slen := uint32(len(s) + 1) // include null terminator
+		slen := uint32(len(s) + 1)
 		if p < slen { return 0 }
 		p -= slen
 	}
 	return p
 }
 
-// exec.c lines 154-177: change_ldt (simplified)
 func changeLdt(textSize uint32, page []uint32) uint32 {
-	// In Go, we don't manipulate LDT/GDT. We just set limits.
 	dataLimit := uint32(0x4000000)
 	return dataLimit
 }
 
-// exec.c lines 182-353: do_execve
 func DoExecve(filename string, argv []string, envp []string) int {
 	var page [MAX_ARG_PAGES]uint32
+	var bh *BufferHead
+	var ex ExecHeader
+	var eUid uint16
+	var eGid uint16
 	argc := countArgs(argv)
 	envc := countArgs(envp)
+	_ = envc
 	p := uint32(PAGE_SIZE*MAX_ARG_PAGES - 4)
 
 	inode := Namei(filename)
@@ -103,14 +89,14 @@ func DoExecve(filename string, argv []string, envp []string) int {
 
 	shBang := false
 
+var i int
 restart_interp:
 	if !S_ISREG(inode.IMode) {
 		Iput(inode); goto exec_error1
 	}
-	// Permission check
-	i := int(inode.IMode)
-	eUid := Current.Euid
-	eGid := Current.Egid
+	i = int(inode.IMode)
+	eUid = Current.Euid
+	eGid = Current.Egid
 	if i&S_ISUID != 0 { eUid = inode.IUid }
 	if i&S_ISGID != 0 { eGid = uint16(inode.IGid) }
 	if Current.Euid == inode.IUid { i >>= 6 } else if uint8(Current.Egid) == inode.IGid { i >>= 3 }
@@ -118,13 +104,11 @@ restart_interp:
 		Iput(inode); goto exec_error1
 	}
 
-	bh := Bread(int(inode.IDev), int(inode.IZone[0]))
+	bh = Bread(int(inode.IDev), int(inode.IZone[0]))
 	if bh == nil { Iput(inode); goto exec_error1 }
-	ex := readExecHeader(bh.BData)
+	ex = readExecHeader(bh.BData)
 
-	// #! interpreter check
 	if len(bh.BData) >= 2 && bh.BData[0] == '#' && bh.BData[1] == '!' && !shBang {
-		// Parse interpreter line
 		end := strings.IndexByte(string(bh.BData[2:]), '\n')
 		if end < 0 { end = 1022 }
 		if end > 1022 { end = 1022 }
@@ -139,7 +123,6 @@ restart_interp:
 			p = copyStrings(envp, page[:], p)
 			if argc > 1 { p = copyStrings(argv[1:], page[:], p) }
 		}
-		// Rebuild argv: [interpreter_name, optional_arg, filename, original_args...]
 		newArgv := []string{interp}
 		if len(parts) > 1 { newArgv = append(newArgv, parts[1:]...); }
 		newArgv = append(newArgv, filename)
@@ -154,7 +137,6 @@ restart_interp:
 
 	Brelse(bh)
 
-	// Validate a.out header
 	if ex.AMagic != ZMAGIC || ex.ATrsize != 0 || ex.ADrsize != 0 ||
 		ex.AText+ex.AData+ex.ABss > 0x3000000 ||
 		inode.ISize < ex.AText+ex.AData+ex.ASyms+N_TXTOFF_VAL {
@@ -168,13 +150,12 @@ restart_interp:
 		if p == 0 { Iput(inode); goto exec_error1 }
 	}
 
-	// Point of no return
 	if Current.Executable != nil {
 		Iput(Current.Executable)
 	}
 	Current.Executable = inode
 	for j := 0; j < 32; j++ {
-		Current.Sigaction[j].SaHandler = 0
+		Current.Sigaction[j].SaHandler = nil
 	}
 	for j := 0; j < NR_OPEN; j++ {
 		if (Current.CloseOnExec>>j)&1 != 0 {
@@ -182,13 +163,12 @@ restart_interp:
 		}
 	}
 	Current.CloseOnExec = 0
-	// free_page_tables — simplified
 	Current.UsedMath = 0
 	p += changeLdt(ex.AText, page[:]) - MAX_ARG_PAGES*PAGE_SIZE
-	Current.Brk = int32(ex.ABss + ex.AData + ex.AText)
-	Current.EndData = int32(ex.AData + ex.AText)
-	Current.EndCode = int32(ex.AText)
-	Current.StartStack = int32(p & 0xFFFFF000)
+	Current.Brk = uint32(ex.ABss + ex.AData + ex.AText)
+	Current.EndData = uint32(ex.AData + ex.AText)
+	Current.EndCode = uint32(ex.AText)
+	Current.StartStack = uint32(p & 0xFFFFF000)
 	Current.Euid = eUid
 	Current.Egid = eGid
 	return 0

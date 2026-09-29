@@ -1,42 +1,41 @@
-// include/errno.go — ported from linux-0.11/include/errno.h
 package include
 
-// Standard POSIX error numbers.
-// These match the Linux 0.11 errno values.
 const (
-	EPERM   = 1  // Operation not permitted
-	ENOENT  = 2  // No such file or directory
-	ESRCH   = 3  // No such process
-	EINTR   = 4  // Interrupted system call
-	EIO     = 5  // I/O error
-	ENXIO   = 6  // No such device or address
-	E2BIG   = 7  // Argument list too long
-	ENOEXEC = 8  // Exec format error
-	EBADF   = 9  // Bad file number
-	ECHILD  = 10 // No child processes
-	EAGAIN  = 11 // Try again
-	ENOMEM  = 12 // Out of memory
-	EACCES  = 13 // Permission denied
-	EFAULT  = 14 // Bad address
-	ENOTBLK = 15 // Block device required
-	EBUSY   = 16 // Device or resource busy
-	EEXIST  = 17 // File exists
-	EXDEV   = 18 // Cross-device link
-	ENODEV  = 19 // No such device
-	ENOTDIR = 20 // Not a directory
-	EISDIR  = 21 // Is a directory
-	EINVAL  = 22 // Invalid argument
-	ENFILE  = 23 // File table overflow
-	EMFILE  = 24 // Too many open files
-	ENOTTY  = 25 // Not a typewriter
-	ETXTBSY = 26 // Text file busy
-	EFBIG   = 27 // File too large
-	ENOSPC  = 28 // No space left on device
-	ESPIPE  = 29 // Illegal seek
-	EROFS   = 30 // Read-only file system
-	EMLINK  = 31 // Too many links
-	EPIPE   = 32 // Broken pipe
-	EDOM    = 33 // Math argument out of domain
-	ERANGE  = 34 // Math result not representable
-	ENOSYS  = 38 // Function not implemented
+	EPERM   = 1
+	ENOENT  = 2
+	ESRCH   = 3
+	EINTR   = 4
+	EIO     = 5
+	ENXIO   = 6
+	E2BIG   = 7
+	ENOEXEC = 8
+	EBADF   = 9
+	ECHILD  = 10
+	EAGAIN  = 11
+	ENOMEM  = 12
+	EACCES  = 13
+	EFAULT  = 14
+	ENOTBLK = 15
+	EBUSY   = 16
+	EEXIST  = 17
+	EXDEV   = 18
+	ENODEV  = 19
+	ENOTDIR = 20
+	EISDIR  = 21
+	EINVAL  = 22
+	ENFILE  = 23
+	EMFILE  = 24
+	ENOTTY  = 25
+	ETXTBSY = 26
+	EFBIG   = 27
+	ENOSPC  = 28
+	ESPIPE  = 29
+	EROFS   = 30
+	EMLINK  = 31
+	EPIPE   = 32
+	EDOM    = 33
+	ERANGE  = 34
+	ENOSYS     = 38
+	ENOTEMPTY  = 39
+	ERROR      = 99
 )
