@@ -4,25 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
 	"strings"
+
+	"google.golang.org/adk/v2/kernel"
 )
 
-// ShadowExecutor intercepts tool_use blocks from the remote Claude
-// and mirrors the commands locally.
 type ShadowExecutor struct {
-	WorkDir string // working directory for local execution
+	WorkDir string
 	Enabled bool
 }
 
-// toolInput represents the parsed input from different tool types
 type toolInput struct {
-	// bash_tool / computer style
-	Command string `json:"command"`
-	// repl style
-	Code string `json:"code"`
-	// artifacts / str_replace_editor style
+	Command  string `json:"command"`
+	Code     string `json:"code"`
 	Path     string `json:"path"`
 	Content  string `json:"content"`
 	FileText string `json:"file_text"`
@@ -30,8 +24,6 @@ type toolInput struct {
 	NewStr   string `json:"new_str"`
 }
 
-// Execute runs the tool locally based on the tool name and accumulated JSON input.
-// Returns a description of what was done locally, or "" if nothing was executed.
 func (s *ShadowExecutor) Execute(toolName string, inputJSON string) string {
 	if !s.Enabled || inputJSON == "" {
 		return ""
@@ -39,20 +31,17 @@ func (s *ShadowExecutor) Execute(toolName string, inputJSON string) string {
 
 	var input toolInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		log.Printf("[shadow] failed to parse input for %s: %v", toolName, err)
 		return ""
 	}
 
+	var command string
+
 	switch {
 	case isBashTool(toolName):
-		cmd := input.Command
-		if cmd == "" {
-			cmd = input.Code
+		command = input.Command
+		if command == "" {
+			command = input.Code
 		}
-		if cmd == "" {
-			return ""
-		}
-		return s.execBash(cmd)
 
 	case isCreateFile(toolName):
 		path := input.Path
@@ -63,79 +52,49 @@ func (s *ShadowExecutor) Execute(toolName string, inputJSON string) string {
 		if path == "" || content == "" {
 			return ""
 		}
-		return s.execBash(fmt.Sprintf("cat > %s << 'SHADOWEOF'\n%s\nSHADOWEOF", path, content))
+		command = fmt.Sprintf("mkdir -p \"$(dirname '%s')\" && cat > '%s' << 'SHADOWEOF'\n%s\nSHADOWEOF", path, path, content)
 
 	case isStrReplace(toolName):
 		if input.Path == "" || input.OldStr == "" {
 			return ""
 		}
-		// Use sed-like approach
-		log.Printf("[shadow] str_replace on %s (skipped - complex operation)", input.Path)
-		return fmt.Sprintf("[shadow] str_replace on %s noted but skipped locally", input.Path)
+		escaped_old := strings.ReplaceAll(input.OldStr, "'", "'\\''")
+		escaped_new := strings.ReplaceAll(input.NewStr, "'", "'\\''")
+		command = fmt.Sprintf("python3 -c '\nimport sys\nwith open(\"%s\",\"r\") as f: c=f.read()\nold=\"\"\"%s\"\"\"\nnew=\"\"\"%s\"\"\"\nif old not in c:\n    print(\"old_str not found\",file=sys.stderr)\n    sys.exit(1)\nc=c.replace(old,new,1)\nwith open(\"%s\",\"w\") as f: f.write(c)\nprint(\"ok\")\n'", input.Path, escaped_old, escaped_new, input.Path)
 
 	default:
-		log.Printf("[shadow] unknown tool %q, skipping", toolName)
 		return ""
 	}
-}
 
-// ensurePaths scans command for common remote paths and creates them locally.
-func (s *ShadowExecutor) ensurePaths(command string) {
-	paths := []string{
-		"/mnt/user-data/outputs",
-		"/mnt/user-data/uploads",
-		"/home/claude",
-	}
-	for _, p := range paths {
-		if strings.Contains(command, p) {
-			os.MkdirAll(p, 0755)
-		}
-	}
-}
-
-func (s *ShadowExecutor) execBash(command string) string {
-	s.ensurePaths(command)
-	log.Printf("[shadow] ▶ executing: %s", truncateCmd(command, 120))
-
-	cmd := exec.Command("bash", "-c", command)
-	if s.WorkDir != "" {
-		cmd.Dir = s.WorkDir
+	if command == "" {
+		return ""
 	}
 
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-
-	result := stdout.String()
-	errStr := stderr.String()
-	exitCode := 0
+	pid, err := kernel.ForkExec(command, s.WorkDir)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = 1
-			errStr = err.Error()
-		}
+		return fmt.Sprintf("[pid -1] fork: %v", err)
 	}
 
-	// Truncate
+	log.Printf("[pid %d] exec: %s", pid, truncateCmd(command, 120))
+
+	childPid, exitCode, err := kernel.Wait(pid)
+	if err != nil {
+		return fmt.Sprintf("[pid %d] wait: %v", pid, err)
+	}
+
+	result := kernel.GetResult(childPid)
 	if len(result) > 2000 {
-		result = result[:2000] + "\n... (truncated)"
+		result = result[:2000] + "\n..."
 	}
 
-	status := "✓"
+	errStr := kernel.GetStderr(childPid)
+
+	log.Printf("[pid %d] exit=%d stdout=%d stderr=%d", childPid, exitCode, len(result), len(errStr))
+
 	if exitCode != 0 {
-		status = fmt.Sprintf("✗ exit=%d", exitCode)
+		return fmt.Sprintf("[pid %d exit=%d] %s\nstderr: %s", childPid, exitCode, result, truncateCmd(errStr, 500))
 	}
-	log.Printf("[shadow] %s stdout=%d bytes stderr=%d bytes",
-		status, len(stdout.String()), len(stderr.String()))
-
-	if errStr != "" && exitCode != 0 {
-		return fmt.Sprintf("[shadow %s] %s\nstderr: %s", status, result, truncateCmd(errStr, 500))
-	}
-	return fmt.Sprintf("[shadow %s] %s", status, result)
+	return fmt.Sprintf("[pid %d exit=0] %s", childPid, result)
 }
 
 func isBashTool(name string) bool {
