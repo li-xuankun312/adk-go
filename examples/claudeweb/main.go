@@ -426,14 +426,7 @@ func osRunPrompt(llm *claudeweb.Model, r *runner.Runner, sessID string, input st
 	resultStr := result.String()
 	if cowCtx != nil {
 		cowCtx.Append(fmt.Sprintf("assistant: %s", resultStr))
-		ctxTokens := cowCtx.TotalTokens()
-		kernel.AccountContext(pid, ctxTokens)
-		if t != nil && t.ContextLimit > 0 {
-			pct := ctxTokens * 100 / t.ContextLimit
-			if pct >= 80 {
-				fmt.Printf("[context %d%% full, compaction recommended]\n", pct)
-			}
-		}
+		kernel.AccountContext(pid, cowCtx.TotalTokens())
 	}
 
 	cacheKey := fmt.Sprintf("turn_%d_%d", pid, kernel.GetCurrent().Stime)
@@ -443,12 +436,6 @@ func osRunPrompt(llm *claudeweb.Model, r *runner.Runner, sessID string, input st
 	if sess != nil {
 		kernel.GlobalSessionTable.Touch(sess.ID, totalTokens)
 	}
-
-	if t != nil && t.TokenBudget > 0 && t.TokenUsed > t.TokenBudget {
-		fmt.Printf("[token budget exceeded: %d/%d]\n", t.TokenUsed, t.TokenBudget)
-	}
-
-	fmt.Printf("[%d tokens]\n", totalTokens)
 }
 
 func newConversation(name string) (*claudeweb.Model, *runner.Runner, string) {
