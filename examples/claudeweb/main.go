@@ -369,12 +369,16 @@ func runChildProcess(pid int64, prompt string) {
 		exitReason = fmt.Sprintf("used %d > budget %d", t.TokenUsed, t.TokenBudget)
 	}
 
+	var ctxTokens int64
+	if cowCtx != nil {
+		ctxTokens = cowCtx.TotalTokens()
+	}
 	kernel.AgentExit(pid, &kernel.AgentExitInfo{
 		Code:    exitCode,
 		Reason:  exitReason,
 		Result:  resultStr,
 		Tokens:  totalTokens,
-		Context: cowCtx.TotalTokens(),
+		Context: ctxTokens,
 	})
 	log.Printf("[PID=%d] exited code=%s tokens=%d", pid, kernel.ExitCodeName(exitCode), totalTokens)
 }
