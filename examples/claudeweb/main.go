@@ -41,7 +41,7 @@ func main() {
 	}
 
 	kernel.Init()
-	initTask := kernel.Current()
+	initTask := kernel.GetCurrent()
 	initTask.SetPwd(cfg.workDir)
 
 	fmt.Println("═══════════════════════════════════════════════")
@@ -139,7 +139,7 @@ func main() {
 				fmt.Println("  Usage: /kill <pid>")
 				continue
 			}
-			if err := kernel.Kill(n, kernel.SIGKILL); err != nil {
+			if err := kernel.Kill(n, kernel.SIG_KILL); err != nil {
 				fmt.Printf("  kill() error: %v\n", err)
 			} else {
 				fmt.Printf("  kill(%d, SIGKILL) sent\n", n)
