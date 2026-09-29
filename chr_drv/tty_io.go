@@ -294,8 +294,4 @@ func ConWrite(tty *TtyStruct) {
 	}
 }
 
-func RsWrite(tty *TtyStruct) {
-	for !tty.WriteQ.Empty() {
-		_ = tty.WriteQ.Getch()
-	}
-}
+
