@@ -1,0 +1,75 @@
+// fs/block_dev.go — ported from linux-0.11/fs/block_dev.c
+// (C) 1991 Linus Torvalds
+package fs
+
+import (
+	. "google.golang.org/adk/v2/include"
+)
+
+// block_dev.c lines 14-45: block_write
+func BlockWrite(dev int, pos *int64, buf []byte, count int) int {
+	block := int(*pos >> BLOCK_SIZE_BITS)
+	offset := int(*pos) & (BLOCK_SIZE - 1)
+	written := 0
+	bufIdx := 0
+	for count > 0 {
+		chars := BLOCK_SIZE - offset
+		if chars > count { chars = count }
+		var bh *BufferHead
+		if chars == BLOCK_SIZE {
+			bh = Getblk(dev, block)
+		} else {
+			bh = Breada(dev, block, block+1, block+2, -1)
+		}
+		block++
+		if bh == nil {
+			if written != 0 { return written }
+			return -EIO
+		}
+		p := offset
+		offset = 0
+		*pos += int64(chars)
+		written += chars
+		count -= chars
+		for i := 0; i < chars; i++ {
+			if p+i < len(bh.BData) && bufIdx < len(buf) {
+				bh.BData[p+i] = buf[bufIdx]
+			}
+			bufIdx++
+		}
+		bh.BDirt = 1
+		Brelse(bh)
+	}
+	return written
+}
+
+// block_dev.c lines 47-73: block_read
+func BlockRead(dev int, pos *int64, buf []byte, count int) int {
+	block := int(*pos >> BLOCK_SIZE_BITS)
+	offset := int(*pos) & (BLOCK_SIZE - 1)
+	readBytes := 0
+	bufIdx := 0
+	for count > 0 {
+		chars := BLOCK_SIZE - offset
+		if chars > count { chars = count }
+		bh := Breada(dev, block, block+1, block+2, -1)
+		if bh == nil {
+			if readBytes != 0 { return readBytes }
+			return -EIO
+		}
+		block++
+		p := offset
+		offset = 0
+		*pos += int64(chars)
+		readBytes += chars
+		count -= chars
+		for i := 0; i < chars; i++ {
+			if bufIdx < len(buf) && p+i < len(bh.BData) {
+				buf[bufIdx] = bh.BData[p+i]
+			}
+			bufIdx++
+		}
+		Brelse(bh)
+	}
+	return readBytes
+}
