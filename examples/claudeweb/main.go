@@ -45,6 +45,8 @@ func main() {
 	kernel.Init()
 	initTask := kernel.GetCurrent()
 	kernel.SetPwd(initTask, cfg.workDir)
+	kernel.NewCOWContext(0)
+	chr_drv.GetAgentTty(0)
 
 	fmt.Println("═══════════════════════════════════════════════")
 	fmt.Println("  Claude Shadow Agent — Linux 0.11 Process Model")
@@ -132,14 +134,17 @@ func main() {
 				waitPid = n
 			}
 			fmt.Printf("  waitpid(%d)...\n", waitPid)
-			childPid, code, err := kernel.Wait(waitPid)
+			childPid, exitInfo, err := kernel.AgentWait(waitPid)
 			if err != nil {
 				fmt.Printf("  waitpid error: %v\n", err)
 			} else {
-				fmt.Printf("  PID=%d exited with code %d\n", childPid, code)
-				result := kernel.GetResult(childPid)
-				if result != "" {
-					fmt.Printf("  Result:\n%s\n", result)
+				fmt.Printf("  PID=%d exited: %s (tokens=%d)\n",
+					childPid, kernel.ExitCodeName(exitInfo.Code), exitInfo.Tokens)
+				if exitInfo.Reason != "" {
+					fmt.Printf("  reason: %s\n", exitInfo.Reason)
+				}
+				if exitInfo.Result != "" {
+					fmt.Printf("  Result:\n%s\n", exitInfo.Result)
 				}
 			}
 			fmt.Println()
@@ -287,6 +292,23 @@ func main() {
 func runChildProcess(pid int64, prompt string) {
 	llm, r, sessID := newConversation(fmt.Sprintf("pid_%d", pid))
 	kernel.SetConvID(pid, llm.ConvID())
+	kernel.SetupBudgetAlarm(pid)
+
+	filtered, ok := chr_drv.AgentTtyProcess(pid, prompt)
+	if !ok {
+		kernel.AgentExit(pid, &kernel.AgentExitInfo{
+			Code:   kernel.EXIT_FILTER_BLOCK,
+			Reason: "input blocked by tty filter",
+			Result: filtered,
+		})
+		log.Printf("[PID=%d] blocked by tty filter", pid)
+		return
+	}
+
+	cowCtx := kernel.GetCOWContext(pid)
+	if cowCtx != nil {
+		cowCtx.Append(fmt.Sprintf("user: %s", filtered))
+	}
 
 	var result strings.Builder
 	ctx := context.Background()
@@ -295,35 +317,66 @@ func runChildProcess(pid int64, prompt string) {
 		ctx = kernel.TaskCtx(t)
 	}
 
-	msg := genai.NewContentFromText(prompt, "user")
+	var totalTokens int64
+	msg := genai.NewContentFromText(filtered, "user")
 	for event, err := range r.Run(ctx, "user", sessID, msg, agent.RunConfig{}) {
 		if err != nil {
 			result.WriteString(fmt.Sprintf("[Error] %v", err))
 			break
 		}
+
+		if pending := kernel.AgentCheckSignals(pid); pending != 0 {
+			result.WriteString("[interrupted by signal]")
+			break
+		}
+
 		if event.Content != nil {
 			for _, part := range event.Content.Parts {
 				if part.Text != "" {
 					result.WriteString(part.Text)
+					chunkTokens := int64(len(part.Text) / 4)
+					totalTokens += chunkTokens
+					kernel.AccountTokens(pid, chunkTokens)
+
+					if cowCtx != nil {
+						kernel.AccountContext(pid, cowCtx.TotalTokens()+totalTokens)
+					}
 				}
 			}
 		}
 	}
 
 	resultStr := result.String()
-	tokens := int64(len(resultStr) / 4)
-	kernel.AccountTokens(pid, tokens)
 	kernel.SetResult(pid, resultStr)
+
+	if cowCtx != nil {
+		cowCtx.Append(fmt.Sprintf("assistant: %s", resultStr))
+	}
+
+	kernel.GlobalPromptCache.Put(
+		fmt.Sprintf("pid_%d_conv_%s", pid, llm.ConvID()),
+		resultStr,
+		totalTokens,
+	)
 
 	artName := fmt.Sprintf("pid_%d_result", pid)
 	fs.GlobalArtifactFS.Create(artName, fs.ARTIFACT_RESULT, pid, []byte(resultStr))
 
+	exitCode := kernel.EXIT_SUCCESS
+	exitReason := ""
+	if t != nil && t.TokenUsed > t.TokenBudget && t.TokenBudget > 0 {
+		exitCode = kernel.EXIT_BUDGET_EXCEED
+		exitReason = fmt.Sprintf("used %d > budget %d", t.TokenUsed, t.TokenBudget)
+	}
+
 	kernel.AgentExit(pid, &kernel.AgentExitInfo{
-		Code:   kernel.EXIT_SUCCESS,
-		Result: resultStr,
-		Tokens: tokens,
+		Code:    exitCode,
+		Reason:  exitReason,
+		Result:  resultStr,
+		Tokens:  totalTokens,
+		Context: cowCtx.TotalTokens(),
 	})
-	log.Printf("[PID=%d] process exited, ~%d tokens", pid, tokens)
+	log.Printf("[PID=%d] exited code=%s tokens=%d", pid, kernel.ExitCodeName(exitCode), totalTokens)
 }
 
 func runPrompt(ctx context.Context, llm *claudeweb.Model, r *runner.Runner, sessID string, prompt string, prefix string) {

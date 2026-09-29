@@ -9,6 +9,7 @@ import (
 	"google.golang.org/adk/v2/fs"
 	. "google.golang.org/adk/v2/include"
 	"google.golang.org/adk/v2/kernel"
+	"google.golang.org/adk/v2/lib"
 	"google.golang.org/adk/v2/mm"
 )
 
@@ -63,7 +64,25 @@ func WireAll() {
 	fs.SetPutSuper(fs.PutSuper)
 	fs.SetInvalidateInodes(fs.InvalidateInodes)
 
-	log.Println("wire: all 28 hooks connected")
+	lib.SysExitFn = func(code int) { kernel.DoExit(int32(code)) }
+	lib.SysCloseFn = func(fd int) int { return kernel.SysClose(int32(fd)) }
+	lib.SysDupFn = func(fd uint32) int { return fs.SysDup(fd) }
+	lib.SysOpenFn = func(name string, flag, mode int) int { return fs.SysOpen(name, flag, mode) }
+	lib.SysWriteFn = func(fd int, buf []byte, count int) int { return fs.SysWrite(uint32(fd), buf, count) }
+	lib.SysSetsidFn = func() int { return int(kernel.SysSetsid()) }
+	lib.SysWaitpidFn = func(pid int, stat *int, options int) int {
+		var s int32
+		ret := kernel.SysWaitpid(int32(pid), &s, int32(options))
+		if stat != nil {
+			*stat = int(s)
+		}
+		return int(ret)
+	}
+	lib.SysExecveFn = func(file string, argv, envp []string) int {
+		return fs.DoExecve(file, argv, envp)
+	}
+
+	log.Println("wire: all hooks connected")
 }
 
 func BootWithImage(imageData []byte) bool {
