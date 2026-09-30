@@ -145,6 +145,7 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 		toolBlocks := map[int]*toolBlock{}
 		var collectedTools []toolBlock
 		var parentMsgUUID string
+		var stopReason string
 
 		for event := range events {
 			select {
@@ -215,7 +216,12 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 				}
 
 			case "message_delta":
-				continue
+				var ev MessageDeltaEvent
+				if err := json.Unmarshal(event.Data, &ev); err == nil {
+					if ev.Delta.StopReason != nil {
+						stopReason = *ev.Delta.StopReason
+					}
+				}
 
 			case "message_stop":
 				body.Close()
@@ -241,7 +247,15 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 		body.Close()
 
 	streamDone:
-		if len(collectedTools) == 0 {
+		remoteEnded := stopReason == "end_turn" || stopReason == "max_tokens" || stopReason == "stop_sequence"
+
+		if len(collectedTools) == 0 || remoteEnded {
+			if len(collectedTools) > 0 && m.Shadow != nil {
+				for _, tb := range collectedTools {
+					m.Shadow.Execute(tb.name, tb.inputJSON.String())
+				}
+				log.Printf("claudeweb: remote ended (%s), executed %d tools locally without sending back", stopReason, len(collectedTools))
+			}
 			text := textBuf.String()
 			if text == "" {
 				text = "(empty response)"
