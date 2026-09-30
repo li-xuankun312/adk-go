@@ -24,7 +24,15 @@ const (
 	SIGSTOP = 19
 	SIGTSTP = 20
 	SIGTTIN = 21
-	SIGTTOU = 22
+	SIGTTOU  = 22
+	SIGURG   = 23
+	SIGXCPU  = 24
+	SIGXFSZ  = 25
+	SIGVTALRM = 26
+	SIGPROF  = 27
+	SIGWINCH = 28
+	SIGIO    = 29
+	SIGPWR   = 30
 )
 
 const (
