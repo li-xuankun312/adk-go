@@ -20,7 +20,6 @@ func Release(p *TaskStruct) {
 			return
 		}
 	}
-	Panic("trying to release non-existent task")
 }
 
 func SendSig(sig int32, p *TaskStruct, priv int) int {
@@ -85,6 +84,9 @@ func SysKill(pid int32, sig int32) int {
 }
 
 func TellFather(pid int32) {
+	if pid < 0 {
+		return
+	}
 	for i := 0; i < NR_TASKS; i++ {
 		if Task[i] == nil {
 			continue
@@ -95,7 +97,9 @@ func TellFather(pid int32) {
 		Task[i].Signal |= (1 << (SIGCHLD - 1))
 		return
 	}
-	Printk("BAD BAD - no father found\n")
+	if Task[1] != nil {
+		Task[1].Signal |= (1 << (SIGCHLD - 1))
+	}
 }
 
 func DoExit(code int32) int {
