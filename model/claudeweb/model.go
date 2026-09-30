@@ -328,6 +328,8 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 			}
 		}
 
+		log.Printf("claudeweb: stop_reason=%q tools=%d text=%d", stopReason, len(collectedTools), textBuf.Len())
+
 		switch stopReason {
 		case "tool_use":
 			st.consecutiveContinues = 0
