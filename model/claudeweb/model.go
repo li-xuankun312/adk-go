@@ -249,13 +249,7 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 	streamDone:
 		remoteEnded := stopReason == "end_turn" || stopReason == "max_tokens" || stopReason == "stop_sequence"
 
-		if len(collectedTools) == 0 || remoteEnded {
-			if len(collectedTools) > 0 && m.Shadow != nil {
-				for _, tb := range collectedTools {
-					m.Shadow.Execute(tb.name, tb.inputJSON.String())
-				}
-				log.Printf("claudeweb: remote ended (%s), executed %d tools locally without sending back", stopReason, len(collectedTools))
-			}
+		if len(collectedTools) == 0 {
 			text := textBuf.String()
 			if text == "" {
 				text = "(empty response)"
@@ -269,6 +263,41 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 				FinishReason: genai.FinishReasonStop,
 			}, nil)
 			return
+		}
+
+		if remoteEnded {
+			if m.Shadow != nil {
+				for _, tb := range collectedTools {
+					m.Shadow.Execute(tb.name, tb.inputJSON.String())
+				}
+				log.Printf("claudeweb: remote ended (%s), executed %d tools locally, sending Continue", stopReason, len(collectedTools))
+			}
+			if stream {
+				text := textBuf.String()
+				if text != "" {
+					yield(&model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "model",
+							Parts: []*genai.Part{{Text: text}},
+						},
+						Partial: true,
+					}, nil)
+				}
+			}
+			webReq = &CompletionRequest{
+				Prompt:        "Continue",
+				Model:         m.modelName,
+				Timezone:      "Asia/Shanghai",
+				Locale:        "en-US",
+				Effort:        m.effort,
+				ThinkingMode:  "off",
+				RenderingMode: "messages",
+				Attachments:   []json.RawMessage{},
+				Files:         []json.RawMessage{},
+				SyncSources:   []json.RawMessage{},
+				Tools:         []WebTool{},
+			}
+			continue
 		}
 
 		if m.Shadow == nil {
