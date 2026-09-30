@@ -467,3 +467,49 @@ func CalcMem() {
 		}
 	}
 }
+
+func FreeMemCount() int {
+	physMemMu.Lock()
+	defer physMemMu.Unlock()
+	free := 0
+	for i := 0; i < int(PAGING_PAGES); i++ {
+		if memMap[i] == 0 {
+			free++
+		}
+	}
+	return free
+}
+
+func UsedMemCount() int {
+	physMemMu.Lock()
+	defer physMemMu.Unlock()
+	used := 0
+	for i := 0; i < int(PAGING_PAGES); i++ {
+		if memMap[i] != 0 {
+			used++
+		}
+	}
+	return used
+}
+
+func SharedMemCount() int {
+	physMemMu.Lock()
+	defer physMemMu.Unlock()
+	shared := 0
+	for i := 0; i < int(PAGING_PAGES); i++ {
+		if memMap[i] > 1 {
+			shared++
+		}
+	}
+	return shared
+}
+
+func GetPageRefCount(addr uint32) byte {
+	nr := MAP_NR(addr)
+	if nr >= PAGING_PAGES {
+		return 0
+	}
+	physMemMu.Lock()
+	defer physMemMu.Unlock()
+	return memMap[nr]
+}
