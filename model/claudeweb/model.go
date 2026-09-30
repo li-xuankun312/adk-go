@@ -121,25 +121,75 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	}
 }
 
+const (
+	exitNormal   = 0
+	exitError    = 1
+	exitSignal   = 2
+	exitOOM      = 3
+	exitStarve   = 4
+	exitRounds   = 5
+)
+
+func exitCodeStr(code int) string {
+	switch code {
+	case exitNormal:
+		return "exit"
+	case exitError:
+		return "error"
+	case exitSignal:
+		return "signal"
+	case exitOOM:
+		return "oom"
+	case exitStarve:
+		return "starvation"
+	case exitRounds:
+		return "round_limit"
+	default:
+		return "unknown"
+	}
+}
+
+type loopState struct {
+	rounds              int
+	totalTools          int
+	consecutiveContinues int
+	convID              string
+}
+
 func (m *Model) completionLoop(ctx context.Context, convID string, webReq *CompletionRequest, stream bool, yield func(*model.LLMResponse, error) bool) {
 	const maxContinues = 8
-	var consecutiveContinues int
+	const maxRounds = 20
 
-	for round := 0; round < 20; round++ {
-		body, err := m.client.Completion(convID, webReq)
-		if err != nil {
+	st := &loopState{convID: convID}
+
+	doExit := func(code int, text string) {
+		if text == "" {
+			text = fmt.Sprintf("[%s]", exitCodeStr(code))
+		}
+		if code == exitError {
 			m.mu.Lock()
 			m.convID = ""
 			m.lastSentPrompt = ""
 			m.mu.Unlock()
-			yield(&model.LLMResponse{
-				Content: &genai.Content{
-					Role:  "model",
-					Parts: []*genai.Part{{Text: fmt.Sprintf("[API Error] %v", err)}},
-				},
-				TurnComplete: true,
-				FinishReason: genai.FinishReasonStop,
-			}, nil)
+		}
+		log.Printf("claudeweb: do_exit(%s) rounds=%d tools=%d continues=%d conv=%s",
+			exitCodeStr(code), st.rounds, st.totalTools, st.consecutiveContinues, truncate(st.convID, 8))
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: text}},
+			},
+			TurnComplete: true,
+			FinishReason: genai.FinishReasonStop,
+		}, nil)
+	}
+
+	for round := 0; round < maxRounds; round++ {
+		st.rounds = round + 1
+
+		body, err := m.client.Completion(convID, webReq)
+		if err != nil {
+			doExit(exitError, fmt.Sprintf("[API Error] %v", err))
 			return
 		}
 
@@ -154,7 +204,7 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 			select {
 			case <-ctx.Done():
 				body.Close()
-				yield(nil, ctx.Err())
+				doExit(exitSignal, "[interrupted]")
 				return
 			default:
 			}
@@ -199,6 +249,7 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 							Partial: true,
 						}, nil) {
 							body.Close()
+							doExit(exitSignal, "")
 							return
 						}
 					}
@@ -232,63 +283,29 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 
 			case "error":
 				body.Close()
-				m.mu.Lock()
-				m.convID = ""
-				m.lastSentPrompt = ""
-				m.mu.Unlock()
-				yield(&model.LLMResponse{
-					Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{Text: fmt.Sprintf("[Error] %s", string(event.Data))}},
-					},
-					TurnComplete: true,
-					FinishReason: genai.FinishReasonStop,
-				}, nil)
+				doExit(exitError, fmt.Sprintf("[Error] %s", string(event.Data)))
 				return
 			}
 		}
 		body.Close()
 
 	streamDone:
-		// --- scheduler decision, modeled on Linux 0.11 schedule() ---
-		//
-		// stop_reason is the definitive signal, like task->state in 0.11:
-		//   "tool_use"       = process issued syscall, waiting for result → send results back
-		//   "end_turn"+tools = preempted (time slice / tool limit exhausted) → reschedule (Continue)
-		//   "end_turn"       = process exited naturally → return to user
-		//   "max_tokens"     = OOM-killed → return to user
-		//
-		// consecutiveContinues acts like task->counter: prevents starvation.
 
 		if len(collectedTools) == 0 {
 			text := textBuf.String()
 			if text == "" {
 				text = "(empty response)"
 			}
-			yield(&model.LLMResponse{
-				Content: &genai.Content{
-					Role:  "model",
-					Parts: []*genai.Part{{Text: text}},
-				},
-				TurnComplete: true,
-				FinishReason: genai.FinishReasonStop,
-			}, nil)
+			doExit(exitNormal, text)
 			return
 		}
 
 		if m.Shadow == nil {
-			text := textBuf.String() + "\n[no shadow executor configured]"
-			yield(&model.LLMResponse{
-				Content: &genai.Content{
-					Role:  "model",
-					Parts: []*genai.Part{{Text: text}},
-				},
-				TurnComplete: true,
-				FinishReason: genai.FinishReasonStop,
-			}, nil)
+			doExit(exitError, textBuf.String()+"\n[no shadow executor configured]")
 			return
 		}
 
+		st.totalTools += len(collectedTools)
 		var toolResults []ToolResult
 		for _, tb := range collectedTools {
 			result := m.Shadow.Execute(tb.name, tb.inputJSON.String())
@@ -309,9 +326,8 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 
 		switch stopReason {
 		case "tool_use":
-			// Normal syscall: process explicitly asked for tools, send results back
-			consecutiveContinues = 0
-			log.Printf("claudeweb: tool_use round %d (%d results) parent=%s", round+1, len(toolResults), truncate(parentMsgUUID, 8))
+			st.consecutiveContinues = 0
+			log.Printf("claudeweb: syscall round %d (%d results)", st.rounds, len(toolResults))
 			webReq = &CompletionRequest{
 				Prompt:            "",
 				Model:             m.modelName,
@@ -329,25 +345,16 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 			}
 
 		case "end_turn":
-			// Preempted: tool limit hit. Reschedule unless counter exhausted.
-			consecutiveContinues++
-			if consecutiveContinues >= maxContinues {
+			st.consecutiveContinues++
+			if st.consecutiveContinues >= maxContinues {
 				text := textBuf.String()
 				if text == "" {
-					text = fmt.Sprintf("[auto-continue limit reached (%d)]", maxContinues)
+					text = fmt.Sprintf("[continue limit %d reached]", maxContinues)
 				}
-				log.Printf("claudeweb: continue limit reached (%d/%d), returning to user", consecutiveContinues, maxContinues)
-				yield(&model.LLMResponse{
-					Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{Text: text}},
-					},
-					TurnComplete: true,
-					FinishReason: genai.FinishReasonStop,
-				}, nil)
+				doExit(exitStarve, text)
 				return
 			}
-			log.Printf("claudeweb: preempted (end_turn), executed %d tools, sending Continue (%d/%d)", len(collectedTools), consecutiveContinues, maxContinues)
+			log.Printf("claudeweb: preempted, Continue (%d/%d)", st.consecutiveContinues, maxContinues)
 			webReq = &CompletionRequest{
 				Prompt:        "Continue",
 				Model:         m.modelName,
@@ -363,32 +370,16 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 			}
 
 		default:
-			// max_tokens, stop_sequence, unknown → return to user
 			text := textBuf.String()
 			if text == "" {
 				text = fmt.Sprintf("[stopped: %s]", stopReason)
 			}
-			log.Printf("claudeweb: stopped (%s), returning to user", stopReason)
-			yield(&model.LLMResponse{
-				Content: &genai.Content{
-					Role:  "model",
-					Parts: []*genai.Part{{Text: text}},
-				},
-				TurnComplete: true,
-				FinishReason: genai.FinishReasonStop,
-			}, nil)
+			doExit(exitOOM, text)
 			return
 		}
 	}
 
-	yield(&model.LLMResponse{
-		Content: &genai.Content{
-			Role:  "model",
-			Parts: []*genai.Part{{Text: "[exceeded 20 tool rounds]"}},
-		},
-		TurnComplete: true,
-		FinishReason: genai.FinishReasonStop,
-	}, nil)
+	doExit(exitRounds, fmt.Sprintf("[exceeded %d rounds]", maxRounds))
 }
 
 func (m *Model) extractPrompt(req *model.LLMRequest) string {
