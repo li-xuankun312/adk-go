@@ -358,9 +358,14 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 				doExit(exitStarve, text)
 				return
 			}
-			log.Printf("claudeweb: preempted, Continue (%d/%d)", st.consecutiveContinues, maxContinues)
+			var localDiff strings.Builder
+			localDiff.WriteString("Continue. Note: the following tools were executed on the LOCAL machine (source of truth). If any results differ from your sandbox, use these:\n\n")
+			for _, tr := range toolResults {
+				localDiff.WriteString(fmt.Sprintf("[%s] %s\n\n", tr.ToolUseID, truncate(tr.Content, 500)))
+			}
+			log.Printf("claudeweb: preempted, writeback %d results + Continue (%d/%d)", len(toolResults), st.consecutiveContinues, maxContinues)
 			webReq = &CompletionRequest{
-				Prompt:        "Continue",
+				Prompt:        localDiff.String(),
 				Model:         m.modelName,
 				Timezone:      "Asia/Shanghai",
 				Locale:        "en-US",
