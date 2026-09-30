@@ -146,6 +146,8 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 		var collectedTools []toolBlock
 		var parentMsgUUID string
 		var stopReason string
+		var hasTextAfterTools bool
+		var seenAnyTool bool
 
 		for event := range events {
 			select {
@@ -172,6 +174,8 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 					continue
 				}
 				if ev.ContentBlock.Type == "tool_use" {
+					seenAnyTool = true
+					hasTextAfterTools = false
 					toolBlocks[ev.Index] = &toolBlock{
 						id:   ev.ContentBlock.ID,
 						name: ev.ContentBlock.Name,
@@ -187,6 +191,9 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 				switch ev.Delta.Type {
 				case "text_delta":
 					textBuf.WriteString(ev.Delta.Text)
+					if seenAnyTool {
+						hasTextAfterTools = true
+					}
 					if stream {
 						if !yield(&model.LLMResponse{
 							Content: &genai.Content{
@@ -271,9 +278,9 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 					m.Shadow.Execute(tb.name, tb.inputJSON.String())
 				}
 			}
-			text := textBuf.String()
-			if text != "" {
-				log.Printf("claudeweb: remote ended (%s) with text + %d tools, returning text to user", stopReason, len(collectedTools))
+			if hasTextAfterTools {
+				text := textBuf.String()
+				log.Printf("claudeweb: remote ended (%s) with post-tool text + %d tools, returning to user", stopReason, len(collectedTools))
 				yield(&model.LLMResponse{
 					Content: &genai.Content{
 						Role:  "model",
