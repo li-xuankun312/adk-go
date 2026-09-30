@@ -85,20 +85,17 @@ func SysKill(pid int32, sig int32) int {
 }
 
 func TellFather(pid int32) {
-	if pid != 0 {
-		for i := 0; i < NR_TASKS; i++ {
-			if Task[i] == nil {
-				continue
-			}
-			if Task[i].Pid != pid {
-				continue
-			}
-			Task[i].Signal |= (1 << (SIGCHLD - 1))
-			return
+	for i := 0; i < NR_TASKS; i++ {
+		if Task[i] == nil {
+			continue
 		}
+		if Task[i].Pid != pid {
+			continue
+		}
+		Task[i].Signal |= (1 << (SIGCHLD - 1))
+		return
 	}
 	Printk("BAD BAD - no father found\n")
-	Release(Current)
 }
 
 func DoExit(code int32) int {
