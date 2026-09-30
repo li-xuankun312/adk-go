@@ -270,20 +270,21 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 				for _, tb := range collectedTools {
 					m.Shadow.Execute(tb.name, tb.inputJSON.String())
 				}
-				log.Printf("claudeweb: remote ended (%s), executed %d tools locally, sending Continue", stopReason, len(collectedTools))
 			}
-			if stream {
-				text := textBuf.String()
-				if text != "" {
-					yield(&model.LLMResponse{
-						Content: &genai.Content{
-							Role:  "model",
-							Parts: []*genai.Part{{Text: text}},
-						},
-						Partial: true,
-					}, nil)
-				}
+			text := textBuf.String()
+			if text != "" {
+				log.Printf("claudeweb: remote ended (%s) with text + %d tools, returning text to user", stopReason, len(collectedTools))
+				yield(&model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{Text: text}},
+					},
+					TurnComplete: true,
+					FinishReason: genai.FinishReasonStop,
+				}, nil)
+				return
 			}
+			log.Printf("claudeweb: remote ended (%s), executed %d tools locally, sending Continue", stopReason, len(collectedTools))
 			webReq = &CompletionRequest{
 				Prompt:        "Continue",
 				Model:         m.modelName,
