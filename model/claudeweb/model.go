@@ -55,7 +55,7 @@ func (m *Model) ConvID() string {
 	if m.convID == "" {
 		return "(none)"
 	}
-	return m.convID[:8]
+	return m.convID
 }
 
 type toolBlock struct {
@@ -110,10 +110,14 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			Name:                          "",
 			Model:                         m.modelName,
 			IncludeConversationPreferences: true,
-			IsTemporary:                   true,
+			IsTemporary:                   false,
 		}
 	}
 
+	if isNewConv {
+		log.Printf("claudeweb: new conversation %s", convID)
+		log.Printf("claudeweb: url: %s/chat/%s", m.client.baseURL, convID)
+	}
 	log.Printf("claudeweb: → %s prompt=%q", convID[:8], truncate(prompt, 60))
 
 	return func(yield func(*model.LLMResponse, error) bool) {
