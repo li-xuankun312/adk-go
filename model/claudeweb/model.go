@@ -122,6 +122,9 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 }
 
 func (m *Model) completionLoop(ctx context.Context, convID string, webReq *CompletionRequest, stream bool, yield func(*model.LLMResponse, error) bool) {
+	const maxContinues = 8
+	var consecutiveContinues int
+
 	for round := 0; round < 20; round++ {
 		body, err := m.client.Completion(convID, webReq)
 		if err != nil {
@@ -146,8 +149,6 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 		var collectedTools []toolBlock
 		var parentMsgUUID string
 		var stopReason string
-		var hasTextAfterTools bool
-		var seenAnyTool bool
 
 		for event := range events {
 			select {
@@ -174,8 +175,6 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 					continue
 				}
 				if ev.ContentBlock.Type == "tool_use" {
-					seenAnyTool = true
-					hasTextAfterTools = false
 					toolBlocks[ev.Index] = &toolBlock{
 						id:   ev.ContentBlock.ID,
 						name: ev.ContentBlock.Name,
@@ -191,9 +190,6 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 				switch ev.Delta.Type {
 				case "text_delta":
 					textBuf.WriteString(ev.Delta.Text)
-					if seenAnyTool {
-						hasTextAfterTools = true
-					}
 					if stream {
 						if !yield(&model.LLMResponse{
 							Content: &genai.Content{
@@ -254,7 +250,15 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 		body.Close()
 
 	streamDone:
-		remoteEnded := stopReason == "end_turn" || stopReason == "max_tokens" || stopReason == "stop_sequence"
+		// --- scheduler decision, modeled on Linux 0.11 schedule() ---
+		//
+		// stop_reason is the definitive signal, like task->state in 0.11:
+		//   "tool_use"       = process issued syscall, waiting for result → send results back
+		//   "end_turn"+tools = preempted (time slice / tool limit exhausted) → reschedule (Continue)
+		//   "end_turn"       = process exited naturally → return to user
+		//   "max_tokens"     = OOM-killed → return to user
+		//
+		// consecutiveContinues acts like task->counter: prevents starvation.
 
 		if len(collectedTools) == 0 {
 			text := textBuf.String()
@@ -270,42 +274,6 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 				FinishReason: genai.FinishReasonStop,
 			}, nil)
 			return
-		}
-
-		if remoteEnded {
-			if m.Shadow != nil {
-				for _, tb := range collectedTools {
-					m.Shadow.Execute(tb.name, tb.inputJSON.String())
-				}
-			}
-			if hasTextAfterTools {
-				text := textBuf.String()
-				log.Printf("claudeweb: remote ended (%s) with post-tool text + %d tools, returning to user", stopReason, len(collectedTools))
-				yield(&model.LLMResponse{
-					Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{Text: text}},
-					},
-					TurnComplete: true,
-					FinishReason: genai.FinishReasonStop,
-				}, nil)
-				return
-			}
-			log.Printf("claudeweb: remote ended (%s), executed %d tools locally, sending Continue", stopReason, len(collectedTools))
-			webReq = &CompletionRequest{
-				Prompt:        "Continue",
-				Model:         m.modelName,
-				Timezone:      "Asia/Shanghai",
-				Locale:        "en-US",
-				Effort:        m.effort,
-				ThinkingMode:  "off",
-				RenderingMode: "messages",
-				Attachments:   []json.RawMessage{},
-				Files:         []json.RawMessage{},
-				SyncSources:   []json.RawMessage{},
-				Tools:         []WebTool{},
-			}
-			continue
 		}
 
 		if m.Shadow == nil {
@@ -339,23 +307,78 @@ func (m *Model) completionLoop(ctx context.Context, convID string, webReq *Compl
 			}
 		}
 
-		webReq = &CompletionRequest{
-			Prompt:            "",
-			Model:             m.modelName,
-			Timezone:          "Asia/Shanghai",
-			Locale:            "en-US",
-			Effort:            m.effort,
-			ThinkingMode:      "off",
-			RenderingMode:     "messages",
-			Attachments:       []json.RawMessage{},
-			Files:             []json.RawMessage{},
-			SyncSources:       []json.RawMessage{},
-			Tools:             []WebTool{},
-			ParentMessageUUID: parentMsgUUID,
-			ToolResults:       toolResults,
-		}
+		switch stopReason {
+		case "tool_use":
+			// Normal syscall: process explicitly asked for tools, send results back
+			consecutiveContinues = 0
+			log.Printf("claudeweb: tool_use round %d (%d results) parent=%s", round+1, len(toolResults), truncate(parentMsgUUID, 8))
+			webReq = &CompletionRequest{
+				Prompt:            "",
+				Model:             m.modelName,
+				Timezone:          "Asia/Shanghai",
+				Locale:            "en-US",
+				Effort:            m.effort,
+				ThinkingMode:      "off",
+				RenderingMode:     "messages",
+				Attachments:       []json.RawMessage{},
+				Files:             []json.RawMessage{},
+				SyncSources:       []json.RawMessage{},
+				Tools:             []WebTool{},
+				ParentMessageUUID: parentMsgUUID,
+				ToolResults:       toolResults,
+			}
 
-		log.Printf("claudeweb: → tool_result round %d (%d results) parent=%s", round+1, len(toolResults), parentMsgUUID[:8])
+		case "end_turn":
+			// Preempted: tool limit hit. Reschedule unless counter exhausted.
+			consecutiveContinues++
+			if consecutiveContinues >= maxContinues {
+				text := textBuf.String()
+				if text == "" {
+					text = fmt.Sprintf("[auto-continue limit reached (%d)]", maxContinues)
+				}
+				log.Printf("claudeweb: continue limit reached (%d/%d), returning to user", consecutiveContinues, maxContinues)
+				yield(&model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{Text: text}},
+					},
+					TurnComplete: true,
+					FinishReason: genai.FinishReasonStop,
+				}, nil)
+				return
+			}
+			log.Printf("claudeweb: preempted (end_turn), executed %d tools, sending Continue (%d/%d)", len(collectedTools), consecutiveContinues, maxContinues)
+			webReq = &CompletionRequest{
+				Prompt:        "Continue",
+				Model:         m.modelName,
+				Timezone:      "Asia/Shanghai",
+				Locale:        "en-US",
+				Effort:        m.effort,
+				ThinkingMode:  "off",
+				RenderingMode: "messages",
+				Attachments:   []json.RawMessage{},
+				Files:         []json.RawMessage{},
+				SyncSources:   []json.RawMessage{},
+				Tools:         []WebTool{},
+			}
+
+		default:
+			// max_tokens, stop_sequence, unknown → return to user
+			text := textBuf.String()
+			if text == "" {
+				text = fmt.Sprintf("[stopped: %s]", stopReason)
+			}
+			log.Printf("claudeweb: stopped (%s), returning to user", stopReason)
+			yield(&model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: text}},
+				},
+				TurnComplete: true,
+				FinishReason: genai.FinishReasonStop,
+			}, nil)
+			return
+		}
 	}
 
 	yield(&model.LLMResponse{
