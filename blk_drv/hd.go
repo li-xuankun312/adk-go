@@ -220,7 +220,7 @@ func DoHdRequest() {
 	}
 	sector := blockNr + startSect*2
 	nsect := int(req.NrSectors)
-	// CHS decomposition from absolute sector
+
 	secPerTrack := int(HdInfo[drive].Sect)
 	heads := int(HdInfo[drive].Head)
 	sect := sector%secPerTrack + 1
